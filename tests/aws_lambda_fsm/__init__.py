@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from aws_lambda_fsm.config import set_settings
+from builtins import object
+import logging
+
+logging.basicConfig()
+logging.getLogger('boto3').setLevel(logging.ERROR)
+logging.getLogger('botocore').setLevel(logging.ERROR)
+logging.getLogger().setLevel(logging.DEBUG)
+
+from aws_lambda_fsm.config import set_settings  # flake8: noqa
 
 
 class TestSettings(object):
@@ -46,7 +54,7 @@ class TestSettings(object):
             'testing': 'invalid_endpoint'
         },
         'elasticache': {
-            'testing': 'invalid_endpoint'
+            'testing': 'invalid_endpoint:9999'
         },
         'sns': {
             'testing': 'invalid_endpoint'
@@ -55,5 +63,6 @@ class TestSettings(object):
             'testing': 'invalid_endpoint'
         }
     }
+    BOTO3_CLIENT_ADDITIONAL_KWARGS = {}
 
 set_settings(TestSettings)

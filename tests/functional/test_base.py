@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -33,10 +33,11 @@ MEMCACHED_CACHE_SOURCE = 'arn:partition:elasticache:testing:account:primary_cach
 REDIS_CACHE_SOURCE = 'arn:partition:elasticache:testing:account:secondary_cache_source'
 DYNAMODB_CACHE_SOURCE = 'arn:partition:dynamodb:testing:account:table/cache_source'
 ENDPOINTS = {
-    DYNAMODB_CACHE_SOURCE: 'http://localhost:4568'
+    DYNAMODB_CACHE_SOURCE: 'http://localhost:4569'
 }
 ELASTICACHE_ENDPOINTS = {
     MEMCACHED_CACHE_SOURCE: {
+        'CacheClusterId': 'memcached-cluster',
         'Engine': 'memcached',
         'ConfigurationEndpoint': {
             'Address': 'localhost',
@@ -44,11 +45,16 @@ ELASTICACHE_ENDPOINTS = {
         }
     },
     REDIS_CACHE_SOURCE: {
+        'CacheClusterId': 'redis-cluster',
         'Engine': 'redis',
-        'ConfigurationEndpoint': {
-            'Address': 'localhost',
-            'Port': 6379
-        }
+        'CacheNodes': [
+            {
+                'Endpoint': {
+                    'Address': 'localhost',
+                    'Port': 6379
+                }
+            }
+        ]
     }
 }
 
@@ -59,6 +65,7 @@ class MockSettingsTest(unittest.TestCase):
         self.patcher = mock.patch('aws_lambda_fsm.aws.settings')
         self.addCleanup(self.patcher.stop)
         self.mock_settings = self.patcher.start()
+        self.mock_settings.AWS_CHAOS = None
         self.patch_settings()
 
     def patch_settings(self):

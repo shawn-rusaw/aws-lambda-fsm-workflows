@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,6 +15,9 @@
 ################################################################################
 # FSM Data Related
 ################################################################################
+
+# system imports
+from builtins import object
 
 
 class ENVIRONMENT(object):
@@ -48,6 +51,8 @@ class SYSTEM_CONTEXT(object):
     TOPIC = 'topic'
     METRICS = 'metrics'
     LEASE_PRIMARY = 'lease_primary'
+    ADDITIONAL_DELAY_SECONDS = 'additional_delay_seconds'
+    LEASE_TIMEOUT = 'lease_timeout'
 
 
 class OBJ(object):
@@ -57,6 +62,8 @@ class OBJ(object):
     SOURCE = 'source'
     DELAY = 'delay'
     FENCE_TOKEN = 'fence_token'
+    LAMBDA_RECORD = 'lambda_record'
+    LAMBDA_CONTEXT = 'lambda_context'
 
 
 class ERRORS(object):
@@ -95,6 +102,7 @@ class CONFIG(object):
     EVENT = 'event'
     TARGET = 'target'
     TOPIC = 'topic'
+    LOCAL = 'local'
     MAX_RETRIES = 'max_retries'
     DEFAULT_MAX_RETRIES = 5
 
@@ -182,10 +190,24 @@ class AWS(object):
 class AWS_ELASTICACHE(object):
 
     CacheClusters = 'CacheClusters'
+    ReplicationGroups = 'ReplicationGroups'
     Engine = 'Engine'
     ConfigurationEndpoint = 'ConfigurationEndpoint'
+    Endpoint = 'Endpoint'
+    PrimaryEndpoint = 'PrimaryEndpoint'
+    CacheClusterId = 'CacheClusterId'
+    ReplicationGroupId = 'ReplicationGroupId'
+    TransitEncryptionEnabled = 'TransitEncryptionEnabled'
+    AuthTokenEnabled = 'AuthTokenEnabled'
+    CacheNodes = 'CacheNodes'
+    NodeGroups = 'NodeGroups'
 
-    class CONFIGURATION_ENDPOINT(object):
+    class RESOURCE_TYPE(object):
+
+        CLUSTER = 'cluster'
+        SNAPSHOT = 'snapshot'
+
+    class ENDPOINT(object):
 
         Address = 'Address'
         Port = 'Port'
@@ -292,6 +314,19 @@ class AWS_DYNAMODB(object):
 
 class AWS_LAMBDA(object):
     Records = 'Records'
+    EventSource = 'eventSource'
+    EventSourceCaps = 'EventSource'
+    Source = 'source'
+    REDACTED = '[REDACTED]'
+
+    class EVENT_SOURCE(object):
+        KINESIS = 'aws:kinesis'
+        DYNAMODB = 'aws:dynamodb'
+        SNS = 'aws:sns'
+        SQS = 'aws:sqs'
+
+    class SOURCE(object):
+        EVENTS = 'aws.events'
 
     class KINESIS_RECORD(object):
         KINESIS = 'kinesis'
@@ -305,3 +340,7 @@ class AWS_LAMBDA(object):
         SNS = 'Sns'
         Message = 'Message'
         DEFAULT = 'default'
+
+    class SQS_RECORD(object):
+        SQS = 'sqs'
+        BODY = 'body'

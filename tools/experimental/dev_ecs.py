@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,15 +18,19 @@
 # dev_ecs.py
 #
 # system imports
-import BaseHTTPServer
-import SocketServer
+import http.server
+import socketserver
 import argparse
 import json
 import subprocess
+import os
+from future import standard_library
+standard_library.install_aliases()
 
 # library imports
 
 # application imports
+from aws_lambda_fsm.serialization import json_loads_additional_kwargs
 
 # setup the command line args
 parser = argparse.ArgumentParser(description='Mock AWS ECS service.')
@@ -51,19 +55,26 @@ args = parser.parse_args()
 # }
 
 
-class Handler(BaseHTTPServer.BaseHTTPRequestHandler):
+class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
 
         length = int(self.headers['content-length'])
-        data = json.loads(self.rfile.read(length))
+        data = json.loads(self.rfile.read(length), **json_loads_additional_kwargs())
 
         subprocess_args = ['docker', 'run', '-v', '/var/run/docker.sock:/var/run/docker.sock']
+        if 'VOLUME' in os.environ:
+            subprocess_args.extend(['-v', os.environ['VOLUME']])
+        if 'LINK' in os.environ:
+            subprocess_args.extend(['--link=' + os.environ['LINK']])
+        if 'NETWORK' in os.environ:
+            subprocess_args.extend(['--network=' + os.environ['NETWORK']])
         co = data.get('overrides', {}).get('containerOverrides', [])
         environ = {}
         if co:
             for env in co[0].get('environment', []):
                 environ[env['name']] = env['value']
                 subprocess_args.extend(['-e', '%(name)s=%(value)s' % env])
+        subprocess_args.extend(['-e', 'PYTHON_BIN=%s' % os.environ['PYTHON_BIN']])
         subprocess_args.append(args.image)
         subprocess.call(subprocess_args)
 
@@ -76,6 +87,5 @@ class Handler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write('{}')
 
-httpd = SocketServer.TCPServer(("", args.port), Handler)
-
+httpd = socketserver.TCPServer(("", args.port), Handler)
 httpd.serve_forever()

@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # system imports
+from builtins import object
 import base64
 import json
 import unittest
@@ -24,6 +25,9 @@ from botocore.exceptions import ClientError
 # application imports
 from aws_lambda_fsm.client import start_state_machine
 from aws_lambda_fsm import handler
+from aws_lambda_fsm.constants import AWS as AWS_CONSTANTS
+from aws_lambda_fsm.serialization import json_dumps_additional_kwargs
+from aws_lambda_fsm.serialization import json_loads_additional_kwargs
 
 
 class Messages(object):
@@ -47,18 +51,15 @@ class Messages(object):
         s = 'system_context'
         u = 'user_context'
         svars = ('current_state', 'current_event', 'steps', 'retries')
-        serialized = map(lambda x: json.loads(x), self.all_messages)
+        serialized = [json.loads(x, **json_loads_additional_kwargs()) for x in self.all_messages]
         if raw:
             return serialized
         data = enumerate(serialized)
-        return map(
-            lambda x: (
-                x[0],
-                tuple(x[1][s][v] for v in svars),
-                tuple(x[1][u].get(v) for v in uvars)
-            ),
-            data
-        )
+        return [(
+            x[0],
+            tuple(x[1][s][v] for v in svars),
+            tuple(x[1][u].get(v) for v in uvars)
+        ) for x in data]
 
 
 # not threadsafe, yada yada
@@ -85,6 +86,10 @@ class AWSStub(object):
         self.secondary_cache_chaos = 0.0
 
         self.errors = Messages()
+        self.callbacks = {}
+
+    def add_callback(self, method, callback):
+        self.callbacks[method] = callback
 
     def _get_stream_source(self, primary):
         chaos = {True: self.primary_stream_chaos, False: self.secondary_stream_chaos}[primary]
@@ -121,6 +126,8 @@ class AWSStub(object):
             self.secondary_retry_source.recv()
 
     def send_next_event_for_dispatch(self, context, data, correlation_id, delay=0, primary=True, recovering=False):
+        if 'send_next_event_for_dispatch' in self.callbacks:
+            self.callbacks['send_next_event_for_dispatch']()
         if recovering:
             self._get_retry_source(primary).send(data)
         else:
@@ -153,7 +160,7 @@ class AWSStub(object):
         else:
             return self._get_cache_source(primary).get('%s-%s' % (correlation_id, steps))
 
-    def acquire_lease(self, correlation_id, steps, retries, primary=True):
+    def acquire_lease(self, correlation_id, steps, retries, primary=True, timeout=None):
         chaos = {True: self.primary_cache_chaos, False: self.secondary_cache_chaos}[primary]
         if chaos and random.uniform(0.0, 1.0) < chaos:
             return 0
@@ -179,7 +186,7 @@ class AWSStub(object):
                 return False
 
     def increment_error_counters(self, data, dimensions):
-        self.errors.send(json.dumps((data, dimensions)))
+        self.errors.send(json.dumps((data, dimensions), **json_dumps_additional_kwargs()))
         return {'test': 'stub'}
 
     def store_checkpoint(self, context, sent, primary=True):
@@ -203,19 +210,37 @@ class AWSStub(object):
         self.secondary_cache_chaos = 0.0
         self.empty_primary_cache = False
         self.empty_secondary_cache = False
+        self.callbacks = {}
 
 
 def to_kinesis_message(data):
     return {
-        "Records": [{
-            "kinesis": {
-                "data": base64.b64encode(data)
-            }
-        }]
+        "eventSource": "aws:kinesis",
+        "kinesis": {
+            "data": base64.b64encode(data.encode('utf-8'))
+        }
+    }
+
+
+def to_sqs_message(data):
+    return {
+        "eventSource": "aws:sqs",
+        "body": data
+    }
+
+
+def to_sns_message(data):
+    return {
+        "eventSource": "aws:sns",
+        "Sns": {
+            "Message": data
+        }
     }
 
 
 class BaseFunctionalTest(unittest.TestCase):
+
+    MESSAGE_TYPE = AWS_CONSTANTS.KINESIS
 
     def _execute(self, aws, machine_name, context,
                  primary_stream_chaos=0.0,
@@ -245,5 +270,10 @@ class BaseFunctionalTest(unittest.TestCase):
             aws.empty_secondary_cache = empty_secondary_cache
         message = aws.get_message()
         while message:
-            handler.lambda_kinesis_handler(to_kinesis_message(message))
+            if AWS_CONSTANTS.KINESIS == self.MESSAGE_TYPE:
+                handler.lambda_kinesis_handler(to_kinesis_message(message), {})
+            elif AWS_CONSTANTS.SQS == self.MESSAGE_TYPE:
+                handler.lambda_sqs_handler(to_sqs_message(message), {})
+            elif AWS_CONSTANTS.SNS == self.MESSAGE_TYPE:
+                handler.lambda_sns_handler(to_sns_message(message), {})
             message = aws.get_message()

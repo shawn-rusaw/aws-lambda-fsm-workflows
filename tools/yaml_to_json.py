@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: UTF-8 -*-
 
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the 'License');
 # you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 # limitations under the License.
 
 # system imports
+from __future__ import print_function
 import argparse
 import json
 
@@ -24,6 +25,7 @@ import json
 # application imports
 from aws_lambda_fsm.config import get_current_configuration
 from aws_lambda_fsm.constants import CONFIG
+from aws_lambda_fsm.serialization import json_dumps_additional_kwargs
 
 # setup the command line args
 parser = argparse.ArgumentParser(description='Turns an fsm.yaml file into an AWS Step Function json definition.')
@@ -102,7 +104,7 @@ def search_for_machine(filename='fsm.yaml'):
             continue
         if machine_dict[CONFIG.NAME] == args.machine_name:
             data = output_machine_dict(machine_dict)
-            print json.dumps(data, indent=2)
+            print(json.dumps(data, indent=2, **json_dumps_additional_kwargs()))
             return
 
 # find the machine in the machine list

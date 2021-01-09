@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # system imports
+from builtins import range
 import uuid
 import json
 import time
@@ -26,6 +27,7 @@ from aws_lambda_fsm.aws import send_next_events_for_dispatch
 from aws_lambda_fsm.constants import SYSTEM_CONTEXT
 from aws_lambda_fsm.constants import STATE
 from aws_lambda_fsm.constants import PAYLOAD
+from aws_lambda_fsm.serialization import json_dumps_additional_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +36,10 @@ def start_state_machine(machine_name,
                         initial_context,
                         correlation_id=None,
                         current_state=STATE.PSEUDO_INIT,
-                        current_event=STATE.PSEUDO_INIT):
+                        current_event=STATE.PSEUDO_INIT,
+                        additional_delay_seconds=0):
     """
-    Insert a AWS Kinesis message that will kick off a state machine.
+    Insert an AWS SQS/Kinesis/SNS/DynamoDB/... message that will kick off a state machine.
 
     :param machine_name: a str name for the machine to start.
     :param initial_context: a dict of initial data for the state machine.
@@ -44,7 +47,8 @@ def start_state_machine(machine_name,
       define it automatically.
     :param current_state: the state to start the machine in.
     :param current_event: the event to start the machine with.
-
+    :param additional_delay_seconds: number of seconds to insert between state transitions
+      (for streams that support delay)
     """
     correlation_id = correlation_id or uuid.uuid4().hex
     system_context = {
@@ -55,6 +59,7 @@ def start_state_machine(machine_name,
         SYSTEM_CONTEXT.STEPS: 0,
         SYSTEM_CONTEXT.RETRIES: 0,
         SYSTEM_CONTEXT.CORRELATION_ID: correlation_id,
+        SYSTEM_CONTEXT.ADDITIONAL_DELAY_SECONDS: additional_delay_seconds
     }
     payload = {
         PAYLOAD.VERSION: PAYLOAD.DEFAULT_VERSION,
@@ -62,7 +67,7 @@ def start_state_machine(machine_name,
         PAYLOAD.USER_CONTEXT: initial_context
     }
     send_next_event_for_dispatch(None,
-                                 json.dumps(payload, sort_keys=True),
+                                 json.dumps(payload, **json_dumps_additional_kwargs()),
                                  correlation_id)
 
 
@@ -70,9 +75,10 @@ def start_state_machines(machine_name,
                          user_contexts,
                          correlation_ids=None,
                          current_state=STATE.PSEUDO_INIT,
-                         current_event=STATE.PSEUDO_INIT):
+                         current_event=STATE.PSEUDO_INIT,
+                         additional_delay_seconds=0):
     """
-    Insert a bulk AWS Kinesis message that will kick off several state machines.
+    Insert a bulk AWS SQS/Kinesis/SNS/DynamoDB/... message that will kick off several state machines.
 
     :param machine_name: a str name for the machine to start.
     :param user_contexts: a list of dict of initial data for the state machines.
@@ -80,6 +86,8 @@ def start_state_machines(machine_name,
       if the system should define then automatically.
     :param current_state: the state to start the machines in.
     :param current_event: the event to start the machines with.
+    :param additional_delay_seconds: number of seconds to insert between state transitions
+      (for streams that support delay)
     """
     all_data = []
     correlation_ids = correlation_ids or [uuid.uuid4().hex for i in range(len(user_contexts))]
@@ -94,13 +102,14 @@ def start_state_machines(machine_name,
             SYSTEM_CONTEXT.STEPS: 0,
             SYSTEM_CONTEXT.RETRIES: 0,
             SYSTEM_CONTEXT.CORRELATION_ID: correlation_id,
+            SYSTEM_CONTEXT.ADDITIONAL_DELAY_SECONDS: additional_delay_seconds
         }
         payload = {
             PAYLOAD.VERSION: PAYLOAD.DEFAULT_VERSION,
             PAYLOAD.SYSTEM_CONTEXT: system_context,
             PAYLOAD.USER_CONTEXT: user_context
         }
-        all_data.append(json.dumps(payload, sort_keys=True))
+        all_data.append(json.dumps(payload, **json_dumps_additional_kwargs()))
     send_next_events_for_dispatch(None,
                                   all_data,
                                   correlation_ids)

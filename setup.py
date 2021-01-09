@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from setuptools import setup, find_packages
-from pip.req import parse_requirements
 
 
 def get_version():
@@ -24,17 +23,22 @@ def get_version():
     return pkg_meta.version
 
 
+# "from pip.req import parse_requirements" no longer works in pip 10
+# so this function is just a simple version that extracts the requirements
+# using a loop and naive filtering.
 def get_requirements(filename):
-    try:
-        from pip.download import PipSession
-
-        session = PipSession()
-    except ImportError:
-        session = None
-
-    reqs = parse_requirements(filename, session=session)
-
-    return [str(r.req) for r in reqs]
+    lines = list(val.strip() for val in open(filename))
+    filtered = []
+    for line in lines:
+        if line.startswith('-r '):
+            continue
+        if '#' in line:
+            line = line.split('#')[0]
+        line = line.strip()
+        if not line:
+            continue
+        filtered.append(line)
+    return filtered
 
 
 def get_packages():
@@ -51,10 +55,15 @@ setup_args = dict(
     author="Shawn Rusaw",
     author_email="shawn.rusaw@workiva.com",
     packages=get_packages(),
-    scripts=["tools/fsm_docker_runner.py",
-             "tools/fsm_sqs_to_arn.py",
+    classifiers=[
+        'Programming Language :: Python :: 2',
+        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.6',
+    ],
+    scripts=["tools/experimental/fsm_docker_runner.py",
              "tools/dev_lambda.py",
-             "tools/dev_ecs.py",
+             "tools/experimental/dev_ecs.py",
              "tools/create_resources.py",
              "tools/create_kinesis_stream.py",
              "tools/create_dynamodb_table.py",
@@ -62,12 +71,14 @@ setup_args = dict(
              "tools/create_sqs_queue.py",
              "tools/start_state_machine.py",
              "tools/yaml_to_graphviz.py"],
-    url='http://github.com/Workiva/aws-lambda-fsm-workflows',
+    url='https://workiva.github.io/aws-lambda-fsm-workflows/',
     license="http://www.apache.org/licenses/LICENSE-2.0",
     description="AWS FSMs on Lambda/Kinesis",
-    long_description="",
+    long_description="A Python framework for developing finite state machine-based workflows on "
+                     "AWS Lambda.",
+    python_requires=">=2.7, >=3.6",
     install_requires=get_requirements('requirements.txt'),
-    tests_require=get_requirements('requirements_dev.txt'),
+    tests_require=get_requirements('requirements_dev.txt') + get_requirements('requirements.txt'),
 )
 
 

@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # limitations under the License.
 
 # system imports
+from builtins import object
 import unittest
 
 # library imports
@@ -45,18 +46,25 @@ from aws_lambda_fsm.aws import get_primary_checkpoint_source
 from aws_lambda_fsm.aws import get_secondary_checkpoint_source
 from aws_lambda_fsm.aws import _local
 from aws_lambda_fsm.aws import _get_service_connection
+from aws_lambda_fsm.aws import get_connection_info
 from aws_lambda_fsm.aws import _get_connection_info
 from aws_lambda_fsm.aws import _get_sqs_queue_url
-from aws_lambda_fsm.aws import _get_elasticache_engine_and_endpoint
 from aws_lambda_fsm.aws import ChaosConnection
 from aws_lambda_fsm.aws import get_arn_from_arn_string
 from aws_lambda_fsm.aws import _validate_config
 from aws_lambda_fsm.aws import _validate_cache
 from aws_lambda_fsm.aws import _validate_sqs_urls
 from aws_lambda_fsm.aws import _validate_elasticache_endpoints
+from aws_lambda_fsm.aws import _get_elasticache_engine_and_connection
+from aws_lambda_fsm.aws import _get_elasticache_password
+from aws_lambda_fsm.aws import _get_redis_connection
+from aws_lambda_fsm.aws import _get_memcached_connection
+from aws_lambda_fsm.aws import _get_elasticache_connection
 from aws_lambda_fsm.aws import validate_config
 from aws_lambda_fsm.aws import acquire_lease
 from aws_lambda_fsm.aws import release_lease
+from aws_lambda_fsm.aws import log_once
+from aws_lambda_fsm.aws import ALREADY_LOGGED
 
 
 class Connection(object):
@@ -77,6 +85,11 @@ class Connection(object):
         pass
 
 
+class AnyConfig():
+    def __eq__(self, other):
+        return True
+
+
 def _get_test_arn(service, resource='resourcetype/resourcename'):
     return ':'.join(
         ['arn', 'aws', service, 'testing', '1234567890', resource]
@@ -85,20 +98,40 @@ def _get_test_arn(service, resource='resourcetype/resourcename'):
 
 ELASTICACHE_ENDPOINTS_REDIS = {
     _get_test_arn(AWS.ELASTICACHE): {
+        AWS_ELASTICACHE.CacheClusterId: "redis-cluster",
         AWS_ELASTICACHE.Engine: AWS_ELASTICACHE.ENGINE.REDIS,
-        AWS_ELASTICACHE.ConfigurationEndpoint: {
-            AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Address: "localhost",
-            AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Port: "12345",
-        }
+        AWS_ELASTICACHE.CacheNodes: [
+            {
+                AWS_ELASTICACHE.Endpoint: {
+                    AWS_ELASTICACHE.ENDPOINT.Address: "localhost",
+                    AWS_ELASTICACHE.ENDPOINT.Port: "12345",
+                }
+            }
+        ]
+    }
+}
+
+ELASTICACHE_ENDPOINTS_REDIS_REPLICATION_GROUP = {
+    _get_test_arn(AWS.ELASTICACHE): {
+        AWS_ELASTICACHE.ReplicationGroupId: "redis-replication-group",
+        AWS_ELASTICACHE.NodeGroups: [
+            {
+                AWS_ELASTICACHE.PrimaryEndpoint: {
+                    AWS_ELASTICACHE.ENDPOINT.Address: "localhost",
+                    AWS_ELASTICACHE.ENDPOINT.Port: "12345",
+                }
+            }
+        ]
     }
 }
 
 ELASTICACHE_ENDPOINTS_MEMCACHE = {
     _get_test_arn(AWS.ELASTICACHE): {
+        AWS_ELASTICACHE.CacheClusterId: "memcached-cluster",
         AWS_ELASTICACHE.Engine: AWS_ELASTICACHE.ENGINE.MEMCACHED,
         AWS_ELASTICACHE.ConfigurationEndpoint: {
-            AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Address: "localhost",
-            AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Port: "54321",
+            AWS_ELASTICACHE.ENDPOINT.Address: "localhost",
+            AWS_ELASTICACHE.ENDPOINT.Port: "54321",
         }
     }
 }
@@ -110,25 +143,81 @@ ENDPOINTS_MEMCACHE = {
 }
 
 
+class TestLogOnce(unittest.TestCase):
+
+    def setUp(self):
+        ALREADY_LOGGED.clear()
+        self.count = 0
+
+    def method1(self, *args, **kwargs):
+        pass
+
+    def method2(self, *args, **kwargs):
+        raise Exception()
+
+    def test_log_once(self):
+        log_once(self.method1, "a", 1, c="d")
+        self.assertEqual({"method1-('a', 1)-{'c': 'd'}"}, ALREADY_LOGGED)
+
+    def test_log_once_uses_cache(self):
+        ALREADY_LOGGED.add("method2-('a', 1)-{'c': 'd'}")
+        log_once(self.method2, "a", 1, c="d")
+        self.assertEqual({"method2-('a', 1)-{'c': 'd'}"}, ALREADY_LOGGED)
+
+    def test_log_once_does_not_cache_on_error(self):
+        self.assertRaises(Exception, log_once, self.method2, "a", 1, c="d")
+        self.assertEqual(set(), ALREADY_LOGGED)
+
+
 class TestArn(unittest.TestCase):
 
     def test_slash_resource_missing(self):
         arn = get_arn_from_arn_string('')
         self.assertIsNone(arn.slash_resource())
 
+    def test_slash_resource_type_missing(self):
+        arn = get_arn_from_arn_string('')
+        self.assertIsNone(arn.slash_resource_type())
+
     def test_slash_resource(self):
         arn_string = _get_test_arn(AWS.KINESIS)
         arn = get_arn_from_arn_string(arn_string)
         self.assertEqual('resourcename', arn.slash_resource())
 
+    def test_slash_resource_type(self):
+        arn_string = _get_test_arn(AWS.KINESIS)
+        arn = get_arn_from_arn_string(arn_string)
+        self.assertEqual('resourcetype', arn.slash_resource_type())
+
+    def test_slash_resource_and_type_equal_when_no_splitter(self):
+        arn_string = _get_test_arn(AWS.KINESIS, resource='foobar')
+        arn = get_arn_from_arn_string(arn_string)
+        self.assertEqual('foobar', arn.slash_resource())
+        self.assertEqual('foobar', arn.slash_resource_type())
+
     def test_colon_resource_missing(self):
         arn = get_arn_from_arn_string('')
         self.assertIsNone(arn.colon_resource())
+
+    def test_colon_resource_type_missing(self):
+        arn = get_arn_from_arn_string('')
+        self.assertIsNone(arn.colon_resource_type())
 
     def test_colon_resource(self):
         arn_string = _get_test_arn(AWS.KINESIS, resource='foo:bar')
         arn = get_arn_from_arn_string(arn_string)
         self.assertEqual('bar', arn.colon_resource())
+
+    def test_colon_resource_type(self):
+        arn_string = _get_test_arn(AWS.KINESIS, resource='foo:bar')
+        arn = get_arn_from_arn_string(arn_string)
+        self.assertEqual('foo', arn.colon_resource_type())
+
+    def test_colon_resource_and_type_equal_when_no_splitter(self):
+        arn_string = _get_test_arn(AWS.KINESIS, resource='foobar')
+        arn = get_arn_from_arn_string(arn_string)
+        self.assertEqual('foobar', arn.colon_resource())
+        self.assertEqual('foobar', arn.colon_resource_type())
 
 
 class TestAws(unittest.TestCase):
@@ -212,77 +301,93 @@ class TestAws(unittest.TestCase):
         self.assertIsNone(arn.account_id)
         self.assertIsNone(arn.resource)
 
-    # _get_elasticache_engine_and_endpoint
+    # _get_elasticache_engine_and_connection
 
     @mock.patch('aws_lambda_fsm.aws.settings')
-    def test_get_elasticache_engine_and_endpoint_legacy_memcache1(self,
-                                                                  mock_settings):
+    def test_get_elasticache_engine_and_connection_legacy_memcache1(self,
+                                                                    mock_settings):
         mock_settings.ENDPOINTS = {
             'elasticache': {'testing': 'host:1111'}}
-        actual = _get_elasticache_engine_and_endpoint(_get_test_arn(AWS.ELASTICACHE))
-        expected = ('memcached', 'host:1111')
-        self.assertEqual(expected, actual)
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEqual('memcached', actual[0])
+        self.assertTrue(isinstance(actual[1], memcache.Client))
 
     @mock.patch('aws_lambda_fsm.aws.settings')
-    def test_get_elasticache_engine_and_endpoint_legacy_memcache2(self,
-                                                                  mock_settings):
+    def test_get_elasticache_engine_and_connection_legacy_memcache2(self,
+                                                                    mock_settings):
         mock_settings.ENDPOINTS = {
             _get_test_arn(AWS.ELASTICACHE): 'host:2222'}
-        actual = _get_elasticache_engine_and_endpoint(_get_test_arn(AWS.ELASTICACHE))
-        expected = ('memcached', 'host:2222')
-        self.assertEqual(expected, actual)
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEqual('memcached', actual[0])
+        self.assertTrue(isinstance(actual[1], memcache.Client))
 
     @mock.patch('aws_lambda_fsm.aws.settings')
-    def test_get_elasticache_engine_and_endpoint(self,
-                                                 mock_settings):
+    def test_get_elasticache_engine_and_connection_memcached(self,
+                                                             mock_settings):
+        mock_settings.ENDPOINTS = {}
+        mock_settings.ELASTICACHE_ENDPOINTS = ELASTICACHE_ENDPOINTS_MEMCACHE
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEqual('memcached', actual[0])
+        self.assertTrue(isinstance(actual[1], memcache.Client))
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_get_elasticache_engine_and_connection_redis(self,
+                                                         mock_settings):
         mock_settings.ENDPOINTS = {}
         mock_settings.ELASTICACHE_ENDPOINTS = ELASTICACHE_ENDPOINTS_REDIS
-        actual = _get_elasticache_engine_and_endpoint(_get_test_arn(AWS.ELASTICACHE))
-        expected = ('redis', 'localhost:12345')
-        self.assertEqual(expected, actual)
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEqual('redis', actual[0])
+        self.assertTrue(isinstance(actual[1], redis.StrictRedis))
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_get_elasticache_engine_and_connection_redis_replication_group(self,
+                                                                           mock_settings):
+        mock_settings.ENDPOINTS = {}
+        mock_settings.ELASTICACHE_ENDPOINTS = ELASTICACHE_ENDPOINTS_REDIS_REPLICATION_GROUP
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEqual('redis', actual[0])
+        self.assertTrue(isinstance(actual[1], redis.StrictRedis))
 
     @mock.patch('aws_lambda_fsm.aws.settings')
     @mock.patch('aws_lambda_fsm.aws.boto3')
-    def test_get_elasticache_engine_and_endpoint_not_found(self,
+    def test_get_elasticache_engine_and_connection_not_found(self,
+                                                             mock_boto3,
+                                                             mock_settings):
+        setattr(_local, 'cache_details_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        mock_boto3.client.return_value.describe_cache_clusters.side_effect = \
+            ClientError({'Error': {'Code': 'CacheClusterNotFound'}}, 'Operation')
+        mock_boto3.client.return_value.describe_replication_groups.side_effect = \
+            ClientError({'Error': {'Code': 'ReplicationGroupNotFound'}}, 'Operation')
+        mock_settings.ENDPOINTS = {}
+        mock_settings.ELASTICACHE_ENDPOINTS = {}
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEquals((None, None), actual)
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    @mock.patch('aws_lambda_fsm.aws.boto3')
+    def test_get_elasticache_engine_and_connection_invalid(self,
                                                            mock_boto3,
                                                            mock_settings):
         setattr(_local, 'cache_details_for_' + _get_test_arn(AWS.ELASTICACHE), None)
         mock_boto3.client.return_value.describe_cache_clusters.return_value = {
-            'CacheClusters': []
+            'CacheClusters': [{}]
+        }
+        mock_boto3.client.return_value.describe_replication_groups.return_value = {
+            'ReplicationGroups': [{}]
         }
         mock_settings.ENDPOINTS = {}
         mock_settings.ELASTICACHE_ENDPOINTS = {}
-        actual = _get_elasticache_engine_and_endpoint(_get_test_arn(AWS.ELASTICACHE))
-        self.assertIsNone(actual)
+        self.assertRaises(KeyError, _get_elasticache_engine_and_connection, _get_test_arn(AWS.ELASTICACHE))
 
     @mock.patch('aws_lambda_fsm.aws.settings')
     @mock.patch('aws_lambda_fsm.aws.boto3')
-    def test_get_elasticache_engine_and_endpoint_invalid(self,
-                                                         mock_boto3,
-                                                         mock_settings):
+    def test_get_elasticache_engine_and_connection_on_wire_memcached(self,
+                                                                     mock_boto3,
+                                                                     mock_settings):
         setattr(_local, 'cache_details_for_' + _get_test_arn(AWS.ELASTICACHE), None)
         mock_boto3.client.return_value.describe_cache_clusters.return_value = {
             'CacheClusters': [{
-                'Engine': 'memcached',
-                'foobar': {
-                    'Port': 11211,
-                    'Address': 'foobar.cfg.cache.amazonaws.com'
-                }
-            }]
-        }
-        mock_settings.ENDPOINTS = {}
-        mock_settings.ELASTICACHE_ENDPOINTS = {}
-        actual = _get_elasticache_engine_and_endpoint(_get_test_arn(AWS.ELASTICACHE))
-        self.assertIsNone(actual)
-
-    @mock.patch('aws_lambda_fsm.aws.settings')
-    @mock.patch('aws_lambda_fsm.aws.boto3')
-    def test_get_elasticache_engine_and_endpoint_on_wire(self,
-                                                         mock_boto3,
-                                                         mock_settings):
-        setattr(_local, 'cache_details_for_' + _get_test_arn(AWS.ELASTICACHE), None)
-        mock_boto3.client.return_value.describe_cache_clusters.return_value = {
-            'CacheClusters': [{
+                'CacheClusterId': 'unused',
                 'Engine': 'memcached',
                 'ConfigurationEndpoint': {
                     'Port': 11211,
@@ -292,11 +397,98 @@ class TestAws(unittest.TestCase):
         }
         mock_settings.ENDPOINTS = {}
         mock_settings.ELASTICACHE_ENDPOINTS = {}
-        actual = _get_elasticache_engine_and_endpoint(_get_test_arn(AWS.ELASTICACHE))
-        expected = ('memcached', 'foobar.cfg.cache.amazonaws.com:11211')
-        self.assertEqual(expected, actual)
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEqual('memcached', actual[0])
+        self.assertTrue(isinstance(actual[1], memcache.Client))
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    @mock.patch('aws_lambda_fsm.aws.boto3')
+    def test_get_elasticache_engine_and_connection_on_wire_redis(self,
+                                                                 mock_boto3,
+                                                                 mock_settings):
+        setattr(_local, 'cache_details_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        mock_boto3.client.return_value.describe_cache_clusters.return_value = {
+            'CacheClusters': [{
+                'CacheClusterId': 'unused',
+                'Engine': 'redis',
+                'CacheNodes': [
+                    {
+                        'Endpoint': {
+                            'Port': 6379,
+                            'Address': 'foobar.cfg.cache.amazonaws.com'
+                        }
+                    }
+                ]
+            }]
+        }
+        mock_settings.ENDPOINTS = {}
+        mock_settings.ELASTICACHE_ENDPOINTS = {}
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEqual('redis', actual[0])
+        self.assertTrue(isinstance(actual[1], redis.StrictRedis))
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    @mock.patch('aws_lambda_fsm.aws.boto3')
+    def test_get_elasticache_engine_and_connection_on_wire_redis_replication_group(self,
+                                                                                   mock_boto3,
+                                                                                   mock_settings):
+        setattr(_local, 'cache_details_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        mock_boto3.client.return_value.describe_cache_clusters.side_effect = \
+            ClientError({'Error': {'Code': 'CacheClusterNotFound'}}, 'Operation')
+        mock_boto3.client.return_value.describe_replication_groups.return_value = {
+            'ReplicationGroups': [
+                {
+                    'ReplicationGroupId': 'unused',
+                    'NodeGroups': [
+                        {
+                            'PrimaryEndpoint': {
+                                'Port': 6379,
+                                'Address': 'foobar.cfg.cache.amazonaws.com'
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+        mock_settings.ENDPOINTS = {}
+        mock_settings.ELASTICACHE_ENDPOINTS = {}
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEqual('redis', actual[0])
+        self.assertTrue(isinstance(actual[1], redis.StrictRedis))
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_get_elasticache_engine_and_connection_settings_redis_replication_group(self,
+                                                                                    mock_settings):
+        setattr(_local, 'cache_details_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): {
+                'ReplicationGroupId': 'unused',
+                'NodeGroups': [
+                    {
+                        'PrimaryEndpoint': {
+                            'Port': 6379,
+                            'Address': 'foobar.cfg.cache.amazonaws.com'
+                        }
+                    }
+                ]
+            }
+        }
+        mock_settings.ENDPOINTS = {}
+        actual = _get_elasticache_engine_and_connection(_get_test_arn(AWS.ELASTICACHE))
+        self.assertEqual('redis', actual[0])
+        self.assertTrue(isinstance(actual[1], redis.StrictRedis))
+        self.assertEqual(None, getattr(_local, 'cache_details_for_' + _get_test_arn(AWS.ELASTICACHE)))
 
     # _get_connection_info
+
+    @mock.patch('aws_lambda_fsm.aws._get_connection_info')
+    def test_public_get_connection_info_calls_protected_get_connection_info(self,
+                                                                            mock_get_connection_info):
+        get_connection_info('testservice', 'testregion', 'testarn')
+        self.assertEqual(
+            [mock.call('testservice', 'testregion', 'testarn')],
+            mock_get_connection_info.mock_calls
+        )
 
     @mock.patch('aws_lambda_fsm.aws.settings')
     def test_get_connection_info_looks_up_by_arn(self,
@@ -336,6 +528,85 @@ class TestAws(unittest.TestCase):
         expected = 'testservice', 'testregion', None
         self.assertEqual(expected, actual)
 
+    # _get_elasticache_password
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_get_elasticache_password_returns_password_if_in_settings(self,
+                                                                      mock_settings):
+        mock_settings.ELASTICACHE_PASSWORDS = {_get_test_arn(AWS.ELASTICACHE): "password"}
+        actual = _get_elasticache_password(_get_test_arn(AWS.ELASTICACHE))
+        expected = "password"
+        self.assertEqual(expected, actual)
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_get_elasticache_password_returns_None_if_not_in_settings(self,
+                                                                      mock_settings):
+        mock_settings.ELASTICACHE_PASSWORDS = {}
+        actual = _get_elasticache_password(_get_test_arn(AWS.ELASTICACHE))
+        expected = None
+        self.assertEqual(expected, actual)
+
+    # _get_redis_connection
+
+    def test_get_redis_connection_returns_connection_with_valid_cluster(self):
+        setattr(_local, 'redis_connection_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        actual = _get_redis_connection(
+            _get_test_arn(AWS.ELASTICACHE),
+            ELASTICACHE_ENDPOINTS_REDIS[_get_test_arn(AWS.ELASTICACHE)])
+        self.assertTrue(isinstance(actual, redis.StrictRedis))
+        self.assertEqual(getattr(_local, 'redis_connection_for_' + _get_test_arn(AWS.ELASTICACHE)), actual)
+
+    def test_get_redis_connection_returns_None_with_invalid_cluster(self):
+        setattr(_local, 'redis_connection_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        actual = _get_redis_connection(_get_test_arn(AWS.ELASTICACHE), {'CacheClusterId': 'foobar'})
+        self.assertEqual(None, actual)
+
+    def test_get_redis_connection_returns_connection_with_valid_replication_gropup(self):
+        setattr(_local, 'redis_connection_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        actual = _get_redis_connection(
+            _get_test_arn(AWS.ELASTICACHE),
+            ELASTICACHE_ENDPOINTS_REDIS_REPLICATION_GROUP[_get_test_arn(AWS.ELASTICACHE)])
+        self.assertTrue(isinstance(actual, redis.StrictRedis))
+
+    def test_get_redis_connection_returns_None_with_invalid_replication_group(self):
+        setattr(_local, 'redis_connection_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        actual = _get_redis_connection(_get_test_arn(AWS.ELASTICACHE), {'ReplicationGroupId': 'foobar'})
+        self.assertEqual(None, actual)
+
+    # _get_memcached_connection
+
+    def test_get_memcached_connection_returns_connection_with_valid_cluster(self):
+        setattr(_local, 'memcached_connection_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        actual = _get_memcached_connection(
+            _get_test_arn(AWS.ELASTICACHE),
+            ELASTICACHE_ENDPOINTS_MEMCACHE[_get_test_arn(AWS.ELASTICACHE)])
+        self.assertTrue(isinstance(actual, memcache.Client))
+        self.assertEqual(getattr(_local, 'memcached_connection_for_' + _get_test_arn(AWS.ELASTICACHE)), actual)
+
+    def test_get_memcached_connection_returns_None_with_invalid_cluster(self):
+        setattr(_local, 'memcached_connection_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        actual = _get_memcached_connection(_get_test_arn(AWS.ELASTICACHE), {'CacheClusterId': 'foobar'})
+        self.assertEqual(None, actual)
+
+    # _get_elasticache_connection
+
+    def test_get_elasticache_connection_returns_memcached_connection_with_endpoint_url(self):
+        setattr(_local, 'memcached_connection_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        actual = _get_elasticache_connection(_get_test_arn(AWS.ELASTICACHE), "test:1234")
+        self.assertTrue(isinstance(actual, memcache.Client))
+
+    @mock.patch('aws_lambda_fsm.aws._get_elasticache_engine_and_connection')
+    def test_get_elasticache_connection_calls_get_elasticache_engine_and_connection(self,
+                                                                                    mock_get):
+        mock_get.return_value = 'engine', 'client'
+        setattr(_local, 'memcached_connection_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        setattr(_local, 'redis_connection_for_' + _get_test_arn(AWS.ELASTICACHE), None)
+        _get_elasticache_connection(_get_test_arn(AWS.ELASTICACHE), None)
+        self.assertEqual(
+            [mock.call(_get_test_arn(AWS.ELASTICACHE))],
+            mock_get.mock_calls
+        )
+
     # _get_service_connection
 
     @mock.patch('aws_lambda_fsm.aws._get_connection_info')
@@ -346,6 +617,42 @@ class TestAws(unittest.TestCase):
         conn = _get_service_connection(_get_test_arn(AWS.KINESIS))
         self.assertIsNotNone(conn)
         self.assertIsNotNone(getattr(_local, 'connection_to_' + _get_test_arn(AWS.KINESIS)))
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    @mock.patch('aws_lambda_fsm.aws.boto3')
+    def test_get_service_connection_passes_additional_args(self, mock_boto3, mock_settings):
+        mock_settings.ENDPOINTS = {}
+        mock_settings.BOTO3_CLIENT_ADDITIONAL_KWARGS = {'verify': True}
+        setattr(_local, 'connection_to_' + _get_test_arn(AWS.KINESIS), None)
+        _get_service_connection(_get_test_arn(AWS.KINESIS))
+
+        mock_boto3.client.assert_called_once_with(
+            'kinesis', config=AnyConfig(), endpoint_url=None, region_name='testing', verify=True
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    @mock.patch('aws_lambda_fsm.aws.boto3')
+    def test_get_service_connection_passes_no_additional_args(self, mock_boto3, mock_settings):
+        mock_settings.ENDPOINTS = {}
+        mock_settings.BOTO3_CLIENT_ADDITIONAL_KWARGS = {}
+        setattr(_local, 'connection_to_' + _get_test_arn(AWS.KINESIS), None)
+        _get_service_connection(_get_test_arn(AWS.KINESIS))
+
+        mock_boto3.client.assert_called_once_with(
+            'kinesis', config=AnyConfig(), endpoint_url=None, region_name='testing'
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    @mock.patch('aws_lambda_fsm.aws.boto3')
+    def test_get_service_connection_passes_None_additional_args(self, mock_boto3, mock_settings):
+        mock_settings.ENDPOINTS = {}
+        mock_settings.BOTO3_CLIENT_ADDITIONAL_KWARGS = None
+        setattr(_local, 'connection_to_' + _get_test_arn(AWS.KINESIS), None)
+        _get_service_connection(_get_test_arn(AWS.KINESIS))
+
+        mock_boto3.client.assert_called_once_with(
+            'kinesis', config=AnyConfig(), endpoint_url=None, region_name='testing'
+        )
 
     @mock.patch('aws_lambda_fsm.aws.settings')
     def test_get_service_connection_memcache_exists(self, mock_settings):
@@ -681,6 +988,7 @@ class TestAws(unittest.TestCase):
                                                   mock_get_primary_stream_source,
                                                   mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_primary_stream_source.return_value = _get_test_arn(AWS.KINESIS)
         send_next_event_for_dispatch(mock_context, 'c', 'd')
         mock_get_connection.return_value.put_record.assert_called_with(
@@ -695,6 +1003,7 @@ class TestAws(unittest.TestCase):
                                                              mock_get_primary_retry_source,
                                                              mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_primary_retry_source.return_value = _get_test_arn(AWS.KINESIS)
         send_next_event_for_dispatch(mock_context, 'c', 'd', recovering=True)
         mock_get_connection.return_value.put_record.assert_called_with(
@@ -709,6 +1018,7 @@ class TestAws(unittest.TestCase):
                                                             mock_get_secondary_stream_source,
                                                             mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_secondary_stream_source.return_value = _get_test_arn(AWS.KINESIS)
         send_next_event_for_dispatch(mock_context, 'c', 'd', primary=False)
         mock_get_connection.return_value.put_record.assert_called_with(
@@ -723,6 +1033,7 @@ class TestAws(unittest.TestCase):
                                                                        mock_get_secondary_retry_source,
                                                                        mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_secondary_retry_source.return_value = _get_test_arn(AWS.KINESIS)
         send_next_event_for_dispatch(mock_context, 'c', 'd', primary=False, recovering=True)
         mock_get_connection.return_value.put_record.assert_called_with(
@@ -739,6 +1050,7 @@ class TestAws(unittest.TestCase):
                                                    mock_get_primary_stream_source,
                                                    mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_time.time.return_value = 1234.0
         mock_get_primary_stream_source.return_value = _get_test_arn(AWS.DYNAMODB)
         send_next_event_for_dispatch(mock_context, 'c', 'd')
@@ -753,10 +1065,11 @@ class TestAws(unittest.TestCase):
                                               mock_get_primary_stream_source,
                                               mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_primary_stream_source.return_value = _get_test_arn(AWS.SNS)
         send_next_event_for_dispatch(mock_context, 'c', 'd')
         mock_get_connection.return_value.publish.assert_called_with(
-            Message='{"default": "c"}',
+            Message='c',
             TopicArn=_get_test_arn(AWS.SNS)
         )
 
@@ -768,6 +1081,7 @@ class TestAws(unittest.TestCase):
                                               mock_get_primary_stream_source,
                                               mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_primary_stream_source.return_value = _get_test_arn(AWS.SQS)
         mock_get_sqs_queue_url.return_value = 'https://sqs.testing.amazonaws.com/1234567890/queuename'
         send_next_event_for_dispatch(mock_context, 'c', 'd')
@@ -779,10 +1093,27 @@ class TestAws(unittest.TestCase):
 
     @mock.patch('aws_lambda_fsm.aws.get_connection')
     @mock.patch('aws_lambda_fsm.aws.get_primary_stream_source')
+    @mock.patch('aws_lambda_fsm.aws._get_sqs_queue_url')
+    def test_send_next_event_for_dispatch_sqs_handles_None_context(self,
+                                                                   mock_get_sqs_queue_url,
+                                                                   mock_get_primary_stream_source,
+                                                                   mock_get_connection):
+        mock_get_primary_stream_source.return_value = _get_test_arn(AWS.SQS)
+        mock_get_sqs_queue_url.return_value = 'https://sqs.testing.amazonaws.com/1234567890/queuename'
+        send_next_event_for_dispatch(None, 'c', 'd', delay=123)
+        mock_get_connection.return_value.send_message.assert_called_with(
+            QueueUrl='https://sqs.testing.amazonaws.com/1234567890/queuename',
+            DelaySeconds=123,
+            MessageBody='c'
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.get_connection')
+    @mock.patch('aws_lambda_fsm.aws.get_primary_stream_source')
     def test_send_next_events_for_dispatch_kinesis(self,
                                                    mock_get_primary_stream_source,
                                                    mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_primary_stream_source.return_value = _get_test_arn(AWS.KINESIS)
         send_next_events_for_dispatch(mock_context, ['c', 'cc'], ['d', 'dd'])
         mock_get_connection.return_value.put_records.assert_called_with(
@@ -796,6 +1127,7 @@ class TestAws(unittest.TestCase):
                                                              mock_get_secondary_stream_source,
                                                              mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_secondary_stream_source.return_value = _get_test_arn(AWS.KINESIS)
         send_next_events_for_dispatch(mock_context, ['c', 'cc'], ['d', 'dd'], primary=False)
         mock_get_connection.return_value.put_records.assert_called_with(
@@ -811,6 +1143,7 @@ class TestAws(unittest.TestCase):
                                                     mock_get_primary_stream_source,
                                                     mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_time.time.return_value = 1234.0
         mock_get_primary_stream_source.return_value = _get_test_arn(AWS.DYNAMODB)
         send_next_events_for_dispatch(mock_context, ['c', 'cc'], ['d', 'dd'])
@@ -831,12 +1164,13 @@ class TestAws(unittest.TestCase):
                                                mock_get_primary_stream_source,
                                                mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_primary_stream_source.return_value = _get_test_arn(AWS.SNS)
         send_next_events_for_dispatch(mock_context, ['c', 'cc'], ['d', 'dd'])
         mock_get_connection.return_value.publish.assert_has_calls(
             [
-                mock.call(Message='{"default": "c"}', TopicArn=_get_test_arn(AWS.SNS)),
-                mock.call(Message='{"default": "cc"}', TopicArn=_get_test_arn(AWS.SNS))
+                mock.call(Message='c', TopicArn=_get_test_arn(AWS.SNS)),
+                mock.call(Message='cc', TopicArn=_get_test_arn(AWS.SNS))
             ], any_order=True
         )
 
@@ -848,6 +1182,7 @@ class TestAws(unittest.TestCase):
                                                mock_get_primary_stream_source,
                                                mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_primary_stream_source.return_value = _get_test_arn(AWS.SQS)
         mock_get_sqs_queue_url.return_value = 'https://sqs.testing.amazonaws.com/1234567890/queuename'
         send_next_events_for_dispatch(mock_context, ['c', 'cc'], ['d', 'dd'])
@@ -855,6 +1190,22 @@ class TestAws(unittest.TestCase):
             QueueUrl='https://sqs.testing.amazonaws.com/1234567890/queuename',
             Entries=[{'DelaySeconds': 0, 'Id': 'd', 'MessageBody': 'c'},
                      {'DelaySeconds': 0, 'Id': 'dd', 'MessageBody': 'cc'}]
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.get_connection')
+    @mock.patch('aws_lambda_fsm.aws.get_primary_stream_source')
+    @mock.patch('aws_lambda_fsm.aws._get_sqs_queue_url')
+    def test_send_next_events_for_dispatch_sqs_handles_None_context(self,
+                                                                    mock_get_sqs_queue_url,
+                                                                    mock_get_primary_stream_source,
+                                                                    mock_get_connection):
+        mock_get_primary_stream_source.return_value = _get_test_arn(AWS.SQS)
+        mock_get_sqs_queue_url.return_value = 'https://sqs.testing.amazonaws.com/1234567890/queuename'
+        send_next_events_for_dispatch(None, ['c', 'cc'], ['d', 'dd'], delay=123)
+        mock_get_connection.return_value.send_message_batch.assert_called_with(
+            QueueUrl='https://sqs.testing.amazonaws.com/1234567890/queuename',
+            Entries=[{'DelaySeconds': 123, 'Id': 'd', 'MessageBody': 'c'},
+                     {'DelaySeconds': 123, 'Id': 'dd', 'MessageBody': 'cc'}]
         )
 
     # retriable_entities
@@ -893,15 +1244,16 @@ class TestAws(unittest.TestCase):
                                    mock_settings,
                                    mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_context.correlation_id = 'b'
         mock_context.steps = 'z'
         mock_settings.PRIMARY_RETRY_SOURCE = _get_test_arn(AWS.DYNAMODB)
-        start_retries(mock_context, 'c', 'd', primary=True)
+        start_retries(mock_context, 999, 'd', primary=True)
         mock_get_connection.return_value.put_item.assert_called_with(
-            Item={'partition': {'N': '15'},
+            Item={'partition': {'N': '13'},
                   'payload': {'S': 'd'},
                   'correlation_id_steps': {'S': 'b-z'},
-                  'run_at': {'N': 'c'}},
+                  'run_at': {'N': '999'}},
             TableName='resourcename'
         )
 
@@ -911,15 +1263,16 @@ class TestAws(unittest.TestCase):
                                               mock_settings,
                                               mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_context.correlation_id = 'b'
         mock_context.steps = 'z'
         mock_settings.PRIMARY_STREAM_SOURCE = _get_test_arn(AWS.DYNAMODB)
-        start_retries(mock_context, 'c', 'd', primary=True, recovering=True)
+        start_retries(mock_context, 999, 'd', primary=True, recovering=True)
         mock_get_connection.return_value.put_item.assert_called_with(
-            Item={'partition': {'N': '15'},
+            Item={'partition': {'N': '13'},
                   'payload': {'S': 'd'},
                   'correlation_id_steps': {'S': 'b-z'},
-                  'run_at': {'N': 'c'}},
+                  'run_at': {'N': '999'}},
             TableName='resourcename'
         )
 
@@ -929,9 +1282,10 @@ class TestAws(unittest.TestCase):
                                      mock_settings,
                                      mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_context.correlation_id = 'b'
         mock_settings.SECONDARY_RETRY_SOURCE = _get_test_arn(AWS.KINESIS)
-        start_retries(mock_context, 'c', 'd', primary=False)
+        start_retries(mock_context, 999, 'd', primary=False)
         mock_get_connection.return_value.put_record.assert_called_with(
             PartitionKey='b',
             Data='d',
@@ -944,9 +1298,10 @@ class TestAws(unittest.TestCase):
                                                 mock_settings,
                                                 mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_context.correlation_id = 'b'
         mock_settings.SECONDARY_STREAM_SOURCE = _get_test_arn(AWS.KINESIS)
-        start_retries(mock_context, 'c', 'd', primary=False, recovering=True)
+        start_retries(mock_context, 999, 'd', primary=False, recovering=True)
         mock_get_connection.return_value.put_record.assert_called_with(
             PartitionKey='b',
             Data='d',
@@ -959,29 +1314,56 @@ class TestAws(unittest.TestCase):
                                mock_settings,
                                mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_context.correlation_id = 'b'
         mock_settings.PRIMARY_RETRY_SOURCE = _get_test_arn(AWS.SNS)
-        start_retries(mock_context, 'c', 'd', primary=True)
+        start_retries(mock_context, 999, 'd', primary=True)
         mock_get_connection.return_value.publish.assert_called_with(
-            Message='{"default": "d"}',
+            Message='d',
             TopicArn=_get_test_arn(AWS.SNS)
         )
 
+    @mock.patch('aws_lambda_fsm.aws.time')
     @mock.patch('aws_lambda_fsm.aws.get_connection')
     @mock.patch('aws_lambda_fsm.aws.settings')
     @mock.patch('aws_lambda_fsm.aws._get_sqs_queue_url')
     def test_start_retries_sqs(self,
                                mock_get_sqs_queue_url,
                                mock_settings,
-                               mock_get_connection):
+                               mock_get_connection,
+                               mock_time):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_context.correlation_id = 'b'
         mock_settings.PRIMARY_RETRY_SOURCE = _get_test_arn(AWS.SQS)
         mock_get_sqs_queue_url.return_value = 'https://sqs.testing.amazonaws.com/1234567890/queuename'
+        mock_time.time.return_value = 0.0
         start_retries(mock_context, 123, 'd', primary=True)
         mock_get_connection.return_value.send_message.assert_called_with(
             QueueUrl='https://sqs.testing.amazonaws.com/1234567890/queuename',
-            DelaySeconds=0,
+            DelaySeconds=123,
+            MessageBody='d'
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.time')
+    @mock.patch('aws_lambda_fsm.aws.get_connection')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    @mock.patch('aws_lambda_fsm.aws._get_sqs_queue_url')
+    def test_start_retries_sqs_with_additional_delay(self,
+                                                     mock_get_sqs_queue_url,
+                                                     mock_settings,
+                                                     mock_get_connection,
+                                                     mock_time):
+        mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 123
+        mock_context.correlation_id = 'b'
+        mock_settings.PRIMARY_RETRY_SOURCE = _get_test_arn(AWS.SQS)
+        mock_get_sqs_queue_url.return_value = 'https://sqs.testing.amazonaws.com/1234567890/queuename'
+        mock_time.time.return_value = 0.0
+        start_retries(mock_context, 123, 'd', primary=True)
+        mock_get_connection.return_value.send_message.assert_called_with(
+            QueueUrl='https://sqs.testing.amazonaws.com/1234567890/queuename',
+            DelaySeconds=246,
             MessageBody='d'
         )
 
@@ -989,8 +1371,9 @@ class TestAws(unittest.TestCase):
     def test_start_retries_no_connection(self,
                                          mock_get_connection):
         mock_context = mock.Mock()
+        mock_context.additional_delay_seconds = 0
         mock_get_connection.return_value = None
-        ret = start_retries(mock_context, 'c', 'd')
+        ret = start_retries(mock_context, 999, 'd')
         self.assertIsNone(ret)
 
     # stop_retries
@@ -1006,7 +1389,7 @@ class TestAws(unittest.TestCase):
         mock_settings.PRIMARY_RETRY_SOURCE = _get_test_arn(AWS.DYNAMODB)
         stop_retries(mock_context, primary=True)
         mock_get_connection.return_value.delete_item.assert_called_with(
-            Key={'partition': {'N': '15'},
+            Key={'partition': {'N': '13'},
                  'correlation_id_steps': {'S': 'b-z'}},
             TableName='resourcename'
         )
@@ -1334,11 +1717,11 @@ class LeaseMemcacheTest(unittest.TestCase):
         mock_time.time.return_value = 999.
         mock_get_secondary_cache_source.return_value = _get_test_arn(AWS.ELASTICACHE)
         mock_get_connection.return_value.gets.return_value = None
-        mock_get_connection.return_value.cas.return_value = 0
+        mock_get_connection.return_value.add.return_value = 0
         ret = acquire_lease('a', 1, 1, primary=False)
         self.assertTrue(0 is ret)
         mock_get_connection.return_value.gets.assert_called_with('lease-a')
-        mock_get_connection.return_value.cas.assert_called_with('lease-a', '1:1:1299:1', time=86400)
+        mock_get_connection.return_value.add.assert_called_with('lease-a', '1:1:1299:1', time=86400)
 
     @mock.patch('aws_lambda_fsm.aws.get_connection')
     @mock.patch('aws_lambda_fsm.aws.get_secondary_cache_source')
@@ -1353,11 +1736,11 @@ class LeaseMemcacheTest(unittest.TestCase):
         mock_time.time.return_value = 999.
         mock_get_secondary_cache_source.return_value = _get_test_arn(AWS.ELASTICACHE)
         mock_get_connection.return_value.gets.return_value = None
-        mock_get_connection.return_value.cas.return_value = False
+        mock_get_connection.return_value.add.return_value = False
         ret = acquire_lease('a', 1, 1, primary=False)
         self.assertFalse(ret)
         mock_get_connection.return_value.gets.assert_called_with('lease-a')
-        mock_get_connection.return_value.cas.assert_called_with('lease-a', '1:1:1299:1', time=86400)
+        mock_get_connection.return_value.add.assert_called_with('lease-a', '1:1:1299:1', time=86400)
 
     @mock.patch('aws_lambda_fsm.aws.get_connection')
     @mock.patch('aws_lambda_fsm.aws.get_primary_cache_source')
@@ -1372,11 +1755,11 @@ class LeaseMemcacheTest(unittest.TestCase):
         mock_time.time.return_value = 999.
         mock_get_primary_cache_source.return_value = _get_test_arn(AWS.ELASTICACHE)
         mock_get_connection.return_value.gets.return_value = None
-        mock_get_connection.return_value.cas.return_value = False
+        mock_get_connection.return_value.add.return_value = False
         ret = acquire_lease('a', 1, 1)
         self.assertFalse(ret)
         mock_get_connection.return_value.gets.assert_called_with('lease-a')
-        mock_get_connection.return_value.cas.assert_called_with('lease-a', '1:1:1299:1', time=86400)
+        mock_get_connection.return_value.add.assert_called_with('lease-a', '1:1:1299:1', time=86400)
 
     @mock.patch('aws_lambda_fsm.aws.get_connection')
     @mock.patch('aws_lambda_fsm.aws.get_primary_cache_source')
@@ -1391,11 +1774,11 @@ class LeaseMemcacheTest(unittest.TestCase):
         mock_time.time.return_value = 999.
         mock_get_primary_cache_source.return_value = _get_test_arn(AWS.ELASTICACHE)
         mock_get_connection.return_value.gets.return_value = None
-        mock_get_connection.return_value.cas.return_value = True
+        mock_get_connection.return_value.add.return_value = True
         ret = acquire_lease('a', 1, 1)
         self.assertTrue(ret)
         mock_get_connection.return_value.gets.assert_called_with('lease-a')
-        mock_get_connection.return_value.cas.assert_called_with('lease-a', '1:1:1299:1', time=86400)
+        mock_get_connection.return_value.add.assert_called_with('lease-a', '1:1:1299:1', time=86400)
 
     @mock.patch('aws_lambda_fsm.aws.get_connection')
     @mock.patch('aws_lambda_fsm.aws.get_primary_cache_source')
@@ -1452,6 +1835,22 @@ class LeaseMemcacheTest(unittest.TestCase):
         self.assertFalse(ret)
         mock_get_connection.return_value.gets.assert_called_with('lease-a')
         self.assertFalse(mock_get_connection.return_value.cas.called)
+
+    @mock.patch('aws_lambda_fsm.aws.get_connection')
+    @mock.patch('aws_lambda_fsm.aws.get_primary_cache_source')
+    @mock.patch('aws_lambda_fsm.aws.time')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_aquire_lease_memcache_clears_cas_id_cache(self,
+                                                       mock_settings,
+                                                       mock_time,
+                                                       mock_get_primary_cache_source,
+                                                       mock_get_connection):
+        mock_settings.ENDPOINTS = ENDPOINTS_MEMCACHE
+        mock_get_connection.return_value.gets.return_value = '99:99:999999999:99'
+        mock_get_primary_cache_source.return_value = _get_test_arn(AWS.ELASTICACHE)
+        mock_get_connection.return_value.cas_ids = {'lease-a': 'b', 'lease-c': 'd'}
+        acquire_lease('a', 1, 1)
+        self.assertEquals({'lease-c': 'd'}, mock_get_connection.return_value.cas_ids)
 
     # RELEASE
 
@@ -1550,6 +1949,22 @@ class LeaseMemcacheTest(unittest.TestCase):
         self.assertFalse(ret)
         mock_get_connection.return_value.gets.assert_called_with('lease-a')
         self.assertFalse(mock_get_connection.return_value.cas.called)
+
+    @mock.patch('aws_lambda_fsm.aws.get_connection')
+    @mock.patch('aws_lambda_fsm.aws.get_primary_cache_source')
+    @mock.patch('aws_lambda_fsm.aws.time')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_release_lease_memcache_clears_cas_id_cache(self,
+                                                        mock_settings,
+                                                        mock_time,
+                                                        mock_get_primary_cache_source,
+                                                        mock_get_connection):
+        mock_settings.ENDPOINTS = ENDPOINTS_MEMCACHE
+        mock_get_connection.return_value.gets.return_value = '99:99:999999999:99'
+        mock_get_primary_cache_source.return_value = _get_test_arn(AWS.ELASTICACHE)
+        mock_get_connection.return_value.cas_ids = {'lease-a': 'b', 'lease-c': 'd'}
+        release_lease('a', 1, 1, 1)
+        self.assertEquals({'lease-c': 'd'}, mock_get_connection.return_value.cas_ids)
 
 
 class LeaseRedisTest(unittest.TestCase):
@@ -2028,6 +2443,9 @@ class LeaseDynamodbTest(unittest.TestCase):
 
 class ValidateConfigTest(unittest.TestCase):
 
+    def setUp(self):
+        ALREADY_LOGGED.clear()
+
     # _validate_cache
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2044,7 +2462,7 @@ class ValidateConfigTest(unittest.TestCase):
                 mock.call.warning('%s_CACHE_SOURCE supports only _advisory_ locks', 'PRIMARY'),
                 mock.call.warning('%s_CACHE_SOURCE supports only _advisory_ locks', 'SECONDARY'),
             ],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     # _validate_sqs_urls
@@ -2058,7 +2476,7 @@ class ValidateConfigTest(unittest.TestCase):
         _validate_sqs_urls()
         self.assertEqual(
             [],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2075,7 +2493,7 @@ class ValidateConfigTest(unittest.TestCase):
         self.assertEqual(
             [mock.call.warning("SQS_URLS has invalid key '%s' (service)",
                                'arn:aws:dynamodb:testing:1234567890:resourcetype/resourcename')],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2092,7 +2510,7 @@ class ValidateConfigTest(unittest.TestCase):
         self.assertEqual(
             [mock.call.warning("SQS_URLS has invalid entry for key '%s' (url)",
                                'arn:aws:sqs:testing:1234567890:resourcetype/resourcename')],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2108,10 +2526,47 @@ class ValidateConfigTest(unittest.TestCase):
         _validate_sqs_urls()
         self.assertEqual(
             [],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     # _validate_elasticache_endpoints
+
+    def _valid_memcache_cluster(self):
+        return {
+            AWS_ELASTICACHE.CacheClusterId: "cacheClusterId",
+            AWS_ELASTICACHE.Engine: AWS_ELASTICACHE.ENGINE.MEMCACHED,
+            AWS_ELASTICACHE.ConfigurationEndpoint: {
+                AWS_ELASTICACHE.ENDPOINT.Address: "host",
+                AWS_ELASTICACHE.ENDPOINT.Port: 1111,
+            }
+        }
+
+    def _valid_redis_cluster(self):
+        return {
+            AWS_ELASTICACHE.CacheClusterId: "cacheClusterId",
+            AWS_ELASTICACHE.Engine: AWS_ELASTICACHE.ENGINE.REDIS,
+            AWS_ELASTICACHE.CacheNodes: [
+                {
+                    AWS_ELASTICACHE.Endpoint: {
+                        AWS_ELASTICACHE.ENDPOINT.Address: "host",
+                        AWS_ELASTICACHE.ENDPOINT.Port: 1111,
+                    }
+                }
+            ]
+        }
+
+    def _valid_redis_replication_group(self):
+        return {
+            AWS_ELASTICACHE.ReplicationGroupId: "replicationGroupId",
+            AWS_ELASTICACHE.NodeGroups: [
+                {
+                    AWS_ELASTICACHE.PrimaryEndpoint: {
+                        AWS_ELASTICACHE.ENDPOINT.Address: "host",
+                        AWS_ELASTICACHE.ENDPOINT.Port: 1111,
+                    }
+                }
+            ]
+        }
 
     @mock.patch('aws_lambda_fsm.aws.logger')
     @mock.patch('aws_lambda_fsm.aws.settings')
@@ -2122,7 +2577,7 @@ class ValidateConfigTest(unittest.TestCase):
         _validate_elasticache_endpoints()
         self.assertEqual(
             [],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2131,19 +2586,28 @@ class ValidateConfigTest(unittest.TestCase):
                                                                    mock_settings,
                                                                    mock_logger):
         mock_settings.ELASTICACHE_ENDPOINTS = {
-            _get_test_arn(AWS.DYNAMODB): {
-                AWS_ELASTICACHE.Engine: AWS_ELASTICACHE.ENGINE.MEMCACHED,
-                AWS_ELASTICACHE.ConfigurationEndpoint: {
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Address: "host",
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Port: 1111,
-                }
-            }
+            _get_test_arn(AWS.DYNAMODB): self._valid_memcache_cluster()
         }
         _validate_elasticache_endpoints()
         self.assertEqual(
             [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid key '%s'",
                                'arn:aws:dynamodb:testing:1234567890:resourcetype/resourcename')],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.logger')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_validate_validate_elasticache_endpoints_missing_cache_type(self,
+                                                                        mock_settings,
+                                                                        mock_logger):
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): {}
+        }
+        _validate_elasticache_endpoints()
+        self.assertEqual(
+            [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (cache type)",
+                               'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2151,20 +2615,16 @@ class ValidateConfigTest(unittest.TestCase):
     def test_validate_validate_elasticache_endpoints_missing_engine(self,
                                                                     mock_settings,
                                                                     mock_logger):
+        cluster = self._valid_memcache_cluster()
+        del cluster[AWS_ELASTICACHE.Engine]
         mock_settings.ELASTICACHE_ENDPOINTS = {
-            _get_test_arn(AWS.ELASTICACHE): {
-                'foo': AWS_ELASTICACHE.ENGINE.MEMCACHED,
-                AWS_ELASTICACHE.ConfigurationEndpoint: {
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Address: "host",
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Port: 1111,
-                }
-            }
+            _get_test_arn(AWS.ELASTICACHE): cluster
         }
         _validate_elasticache_endpoints()
         self.assertEqual(
             [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (engine)",
                                'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2172,41 +2632,35 @@ class ValidateConfigTest(unittest.TestCase):
     def test_validate_validate_elasticache_endpoints_unknown_engine(self,
                                                                     mock_settings,
                                                                     mock_logger):
+        cluster = self._valid_memcache_cluster()
+        cluster[AWS_ELASTICACHE.Engine] = 'unknown'
         mock_settings.ELASTICACHE_ENDPOINTS = {
-            _get_test_arn(AWS.ELASTICACHE): {
-                AWS_ELASTICACHE.Engine: 'unknown',
-                AWS_ELASTICACHE.ConfigurationEndpoint: {
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Address: "host",
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Port: 1111,
-                }
-            }
+            _get_test_arn(AWS.ELASTICACHE): cluster
         }
         _validate_elasticache_endpoints()
         self.assertEqual(
             [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (unknown engine)",
                                'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
+
+    # _validate_elasticache_endpoints : memcached cluster
 
     @mock.patch('aws_lambda_fsm.aws.logger')
     @mock.patch('aws_lambda_fsm.aws.settings')
     def test_validate_validate_elasticache_endpoints_missing_endpoint(self,
                                                                       mock_settings,
                                                                       mock_logger):
+        cluster = self._valid_memcache_cluster()
+        del cluster[AWS_ELASTICACHE.ConfigurationEndpoint]
         mock_settings.ELASTICACHE_ENDPOINTS = {
-            _get_test_arn(AWS.ELASTICACHE): {
-                AWS_ELASTICACHE.Engine: AWS_ELASTICACHE.ENGINE.MEMCACHED,
-                'foo': {
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Address: "host",
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Port: 1111,
-                }
-            }
+            _get_test_arn(AWS.ELASTICACHE): cluster
         }
         _validate_elasticache_endpoints()
         self.assertEqual(
             [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (endpoint)",
                                'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2214,14 +2668,10 @@ class ValidateConfigTest(unittest.TestCase):
     def test_validate_validate_elasticache_endpoints_missing_address_port(self,
                                                                           mock_settings,
                                                                           mock_logger):
+        cluster = self._valid_memcache_cluster()
+        cluster[AWS_ELASTICACHE.ConfigurationEndpoint] = {}
         mock_settings.ELASTICACHE_ENDPOINTS = {
-            _get_test_arn(AWS.ELASTICACHE): {
-                AWS_ELASTICACHE.Engine: AWS_ELASTICACHE.ENGINE.MEMCACHED,
-                AWS_ELASTICACHE.ConfigurationEndpoint: {
-                    'foo': "host",
-                    'bar': 1111,
-                }
-            }
+            _get_test_arn(AWS.ELASTICACHE): cluster
         }
         _validate_elasticache_endpoints()
         self.assertEqual(
@@ -2229,7 +2679,7 @@ class ValidateConfigTest(unittest.TestCase):
                                'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename'),
              mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (port)",
                                'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2238,18 +2688,150 @@ class ValidateConfigTest(unittest.TestCase):
                                                      mock_settings,
                                                      mock_logger):
         mock_settings.ELASTICACHE_ENDPOINTS = {
-            _get_test_arn(AWS.ELASTICACHE): {
-                AWS_ELASTICACHE.Engine: AWS_ELASTICACHE.ENGINE.MEMCACHED,
-                AWS_ELASTICACHE.ConfigurationEndpoint: {
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Address: "host",
-                    AWS_ELASTICACHE.CONFIGURATION_ENDPOINT.Port: 1111,
-                }
-            }
+            _get_test_arn(AWS.ELASTICACHE): self._valid_memcache_cluster()
         }
         _validate_elasticache_endpoints()
         self.assertEqual(
             [],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
+        )
+
+    # _validate_elasticache_endpoints : redis cluster
+
+    @mock.patch('aws_lambda_fsm.aws.logger')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_validate_validate_elasticache_endpoints_missing_cache_nodes(self,
+                                                                         mock_settings,
+                                                                         mock_logger):
+        cluster = self._valid_redis_cluster()
+        del cluster[AWS_ELASTICACHE.CacheNodes]
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): cluster
+        }
+        _validate_elasticache_endpoints()
+        self.assertEqual(
+            [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (cache nodes)",
+                               'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.logger')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_validate_validate_elasticache_endpoints_missing_endpoint_redis(self,
+                                                                            mock_settings,
+                                                                            mock_logger):
+        cluster = self._valid_redis_cluster()
+        del cluster[AWS_ELASTICACHE.CacheNodes][0][AWS_ELASTICACHE.Endpoint]
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): cluster
+        }
+        _validate_elasticache_endpoints()
+        self.assertEqual(
+            [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (endpoint)",
+                               'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.logger')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_validate_validate_elasticache_endpoints_missing_address_port_redis(self,
+                                                                                mock_settings,
+                                                                                mock_logger):
+        cluster = self._valid_redis_cluster()
+        cluster[AWS_ELASTICACHE.CacheNodes][0][AWS_ELASTICACHE.Endpoint] = {}
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): cluster
+        }
+        _validate_elasticache_endpoints()
+        self.assertEqual(
+            [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (address)",
+                               'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename'),
+             mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (port)",
+                               'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.logger')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_validate_validate_elasticache_endpoints_redis(self,
+                                                           mock_settings,
+                                                           mock_logger):
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): self._valid_redis_cluster()
+        }
+        _validate_elasticache_endpoints()
+        self.assertEqual(
+            [],
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
+        )
+
+    # _validate_elasticache_endpoints : redis replication group
+
+    @mock.patch('aws_lambda_fsm.aws.logger')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_validate_validate_elasticache_endpoints_missing_node_groups(self,
+                                                                         mock_settings,
+                                                                         mock_logger):
+        cluster = self._valid_redis_replication_group()
+        del cluster[AWS_ELASTICACHE.NodeGroups]
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): cluster
+        }
+        _validate_elasticache_endpoints()
+        self.assertEqual(
+            [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (node groups)",
+                               'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.logger')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_validate_validate_elasticache_endpoints_missing_endpoint_redis_replication_group(self,
+                                                                                              mock_settings,
+                                                                                              mock_logger):
+        cluster = self._valid_redis_replication_group()
+        del cluster[AWS_ELASTICACHE.NodeGroups][0][AWS_ELASTICACHE.PrimaryEndpoint]
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): cluster
+        }
+        _validate_elasticache_endpoints()
+        self.assertEqual(
+            [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (endpoint)",
+                               'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.logger')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_validate_validate_elasticache_endpoints_missing_address_port_redis_replication_group(self,
+                                                                                                  mock_settings,
+                                                                                                  mock_logger):
+        cluster = self._valid_redis_replication_group()
+        cluster[AWS_ELASTICACHE.NodeGroups][0][AWS_ELASTICACHE.PrimaryEndpoint] = {}
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): cluster
+        }
+        _validate_elasticache_endpoints()
+        self.assertEqual(
+            [mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (address)",
+                               'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename'),
+             mock.call.warning("ELASTICACHE_ENDPOINTS has invalid entry for key '%s' (port)",
+                               'arn:aws:elasticache:testing:1234567890:resourcetype/resourcename')],
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
+        )
+
+    @mock.patch('aws_lambda_fsm.aws.logger')
+    @mock.patch('aws_lambda_fsm.aws.settings')
+    def test_validate_validate_elasticache_endpoints_redis_replication_group(self,
+                                                                             mock_settings,
+                                                                             mock_logger):
+        mock_settings.ELASTICACHE_ENDPOINTS = {
+            _get_test_arn(AWS.ELASTICACHE): self._valid_redis_replication_group()
+        }
+        _validate_elasticache_endpoints()
+        self.assertEqual(
+            [],
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     # validate_config
@@ -2292,7 +2874,7 @@ class ValidateConfigTest(unittest.TestCase):
                 mock.call.warning('SECONDARY_%s_SOURCE is unset (failover not configured).',
                                   'KEY')
             ],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )
 
     @mock.patch('aws_lambda_fsm.aws.logger')
@@ -2312,5 +2894,5 @@ class ValidateConfigTest(unittest.TestCase):
                 mock.call.warning('PRIMARY_%s_SOURCE = SECONDARY_%s_SOURCE (failover not configured optimally).',
                                   'KEY', 'KEY')
             ],
-            mock_logger.mock_calls
+            list(filter(lambda x: '__str__' not in x[0], mock_logger.mock_calls))
         )

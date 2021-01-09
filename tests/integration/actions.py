@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import time
 from aws_lambda_fsm.action import Action
+
+
+class LongPause(Action):
+    def execute(self, context, obj):
+        time.sleep(5)
+        return 'ok'
 
 
 class ReturnOK(Action):
@@ -22,9 +29,38 @@ class ReturnOK(Action):
         return 'ok'
 
 
+COUNTER = 0
+
+
+def get_counter():
+    global COUNTER
+    return COUNTER
+
+
+def set_counter(counter):
+    global COUNTER
+    COUNTER = counter
+
+
 class IncrementCounter(Action):
+
     def execute(self, context, obj):
+        global COUNTER
         if [context.steps, context.retries] in context.get('fail_at', []):
             raise Exception()
+        COUNTER += 1
         context['counter'] = context.get('counter', 0) + 1
         return 'ok' if (context['counter'] < context['loops']) else 'done'
+
+
+class ResetCounter(Action):
+
+    def execute(self, context, obj):
+        del context['counter']
+        return 'done'
+
+
+class SerializationProblem(Action):
+    def execute(self, context, obj):
+        context['error'] = Exception()
+        return 'ok'

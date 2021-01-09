@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: UTF-8 -*-
 
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,8 +16,11 @@
 # limitations under the License.
 
 # system imports
+from __future__ import print_function
+from future import standard_library
+standard_library.install_aliases()
 import argparse
-import urllib
+import urllib.parse
 
 # library imports
 
@@ -133,9 +136,9 @@ def search_for_machine(filename='fsm.yaml'):
         if machine_dict[CONFIG.NAME] == args.machine_name:
             chl = output_machine_dict(machine_dict)
             if args.format == 'dot':
-                print chl
+                print(chl)
             else:
-                print 'https://chart.googleapis.com/chart?cht=gv&chl=%(chl)s' % {'chl': urllib.quote_plus(chl)}
+                print('https://chart.googleapis.com/chart?cht=gv&chl=%(chl)s' % {'chl': urllib.parse.quote_plus(chl)})
 
 # find the machine in the machine list
 search_for_machine()

@@ -1,5 +1,5 @@
 <!--
-Copyright 2016-2017 Workiva Inc.
+Copyright 2016-2020 Workiva Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,26 +24,28 @@ deployed FSM.
 
 Simply use the provided script in `tools/yaml_to_json.py` to generate a 
 [State Language](https://states-language.net/spec.html) JSON document pointing at the 
-an existing deployed FSM Lmabda. 
+an existing deployed FSM [AWS Lambda](https://aws.amazon.com/lambda/) function. 
 
-    % python tools/yaml_to_json.py --machine_name=tracer --lambda_arn=arn:aws:lambda:us-east-1:999999999999:function:fsm
-    {
-      "Comment": "tracer",
-      "States": {
-        "state1": {
-          "Resource": "arn:aws:lambda:us-east-1:999999999999:function:fsm",
-          "Type": "Task",
-          "Next": "state1-choices"
-        },
-        ...
-      }
-      "StartAt": "state1"
-    }
+```bash
+% python tools/yaml_to_json.py --machine_name=tracer --lambda_arn=arn:aws:lambda:us-east-1:999999999999:function:fsm
+{
+  "Comment": "tracer",
+  "States": {
+    "state1": {
+      "Resource": "arn:aws:lambda:us-east-1:999999999999:function:fsm",
+      "Type": "Task",
+      "Next": "state1-choices"
+    },
+    ...
+  }
+  "StartAt": "state1"
+}
+```
     
 The deployed `fsm.yaml` and the JSON document must match, otherwise the machines can get 
 out of sync. So changes to the `fsm.yaml` require corresponding changes the JSON document.
 
-<img src="docs/images/yaml_to_json.png" width="66%" height="66%"/>
+<img src="images/yaml_to_json.png" width="66%" height="66%"/>
 
 
 [Running on AWS >>](AWS.md) | [Setup AWS Services >>](SETUP.md)

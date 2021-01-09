@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@
 # limitations under the License.
 
 # system imports
+from builtins import int
+from builtins import object
 import json
 import importlib
 from threading import RLock
@@ -45,6 +47,10 @@ from aws_lambda_fsm.constants import SYSTEM_CONTEXT
 from aws_lambda_fsm.constants import PAYLOAD
 from aws_lambda_fsm.constants import AWS
 from aws_lambda_fsm.constants import ERRORS
+from aws_lambda_fsm.constants import LEASE_DATA
+from aws_lambda_fsm.config import get_settings
+from aws_lambda_fsm.serialization import json_dumps_additional_kwargs
+from aws_lambda_fsm.serialization import json_loads_additional_kwargs
 
 
 class Object(object):
@@ -55,6 +61,7 @@ _local = Object()
 _lock = RLock()
 _local.machines = None
 
+settings = get_settings()
 logger = logging.getLogger(__name__)
 
 
@@ -138,15 +145,16 @@ class FSM(object):
                     for transition_dict in state_dict.get(CONFIG.TRANSITIONS, []):
                         action = self._get_action(transition_dict.get(CONFIG.ACTION))
                         event = transition_dict[CONFIG.EVENT]
+                        local = transition_dict.get(CONFIG.LOCAL, False)
                         target_name = transition_dict[CONFIG.TARGET]
                         target = self.machines[machine_name][MACHINE.STATES][target_name]
-                        self._add_transition(machine_name, state, target, event, action=action)
+                        self._add_transition(machine_name, state, target, event, action=action, local=local)
 
-            except (ImportError, ValueError), e:  # pragma: no cover
+            except (ImportError, ValueError) as e:  # pragma: no cover
                 logger.warning('Problem importing machine "%s": %s', machine_name, e)
                 self.machines.pop(machine_name, None)
 
-    def _add_transition(self, machine_name, source, target, event, action=None):
+    def _add_transition(self, machine_name, source, target, event, action=None, local=False):
         """
         A helper function to and an aws_lambda_fsm.transition.Transition instance to the machine.
 
@@ -157,7 +165,7 @@ class FSM(object):
         :param action: an optional aws_lambda_fsm.action.Action instance.
         """
         transition_name = source.name + '->' + target.name + ':' + event
-        transition = Transition(transition_name, target, action=action)
+        transition = Transition(transition_name, target, action=action, local=local)
         self.machines[machine_name][MACHINE.TRANSITIONS][transition_name] = transition
         source.add_transition(transition, event)
 
@@ -264,9 +272,9 @@ class Context(dict):
 
         # immutable
         self.__system_context[SYSTEM_CONTEXT.MACHINE_NAME] = \
-            self.__system_context.get(SYSTEM_CONTEXT.MACHINE_NAME, name)
+            self.__system_context.get(SYSTEM_CONTEXT.MACHINE_NAME, name)  # prefer value in initial_system_context
         self.__system_context[SYSTEM_CONTEXT.MAX_RETRIES] = \
-            self.__system_context.get(SYSTEM_CONTEXT.MAX_RETRIES, max_retries)
+            self.__system_context.get(SYSTEM_CONTEXT.MAX_RETRIES, max_retries)  # prefer value in initial_system_context
 
         self._errors = {}
 
@@ -282,9 +290,20 @@ class Context(dict):
             self.__system_context[SYSTEM_CONTEXT.CORRELATION_ID] = uuid.uuid4().hex
         return self.__system_context[SYSTEM_CONTEXT.CORRELATION_ID]
 
+    def _lookup_property(self, key, setting, default):
+        return self.__system_context.get(key, getattr(settings, setting, None)) or default
+
+    @property
+    def additional_delay_seconds(self):
+        return self._lookup_property(SYSTEM_CONTEXT.ADDITIONAL_DELAY_SECONDS, 'ADDITIONAL_DELAY_SECONDS', 0)
+
     @property
     def max_retries(self):
-        return self.__system_context[SYSTEM_CONTEXT.MAX_RETRIES]
+        return self._lookup_property(SYSTEM_CONTEXT.MAX_RETRIES, 'MAX_RETRIES', CONFIG.DEFAULT_MAX_RETRIES)
+
+    @property
+    def lease_timeout(self):
+        return self._lookup_property(SYSTEM_CONTEXT.LEASE_TIMEOUT, 'LEASE_TIMEOUT', LEASE_DATA.LEASE_TIMEOUT)
 
     # Mutable properties
 
@@ -372,7 +391,7 @@ class Context(dict):
         :param obj: a dict
         """
         retry_system_context = retry_data[PAYLOAD.SYSTEM_CONTEXT]
-        serialized = json.dumps(retry_data, sort_keys=True)
+        serialized = json.dumps(retry_data, **json_dumps_additional_kwargs())
 
         for primary in [True, False]:
             try:
@@ -439,8 +458,7 @@ class Context(dict):
                 try:
                     return store_checkpoint(
                         self,
-                        json.dumps(obj[OBJ.SENT], sort_keys=True,
-                                   default=lambda x: '<skipped>'),
+                        json.dumps(obj[OBJ.SENT], **json_dumps_additional_kwargs()),
                         primary=primary
                     )
                 except ClientError:
@@ -523,6 +541,13 @@ class Context(dict):
         # dispatch the event using the user context only
         next_event = self.current_state.dispatch(self, event, obj)
 
+        # dispatch local transitions without enqueing more messages
+        while next_event \
+                and self.current_state \
+                and self.current_state.get_transition(next_event) \
+                and self.current_state.get_transition(next_event).local:
+            next_event = self.current_state.dispatch(self, next_event, obj)
+
         # if there are more events
         if next_event:
 
@@ -531,7 +556,7 @@ class Context(dict):
             ctx.steps += 1
             ctx.retries = 0
             ctx.current_event = next_event
-            serialized = json.dumps(ctx.to_payload_dict(), sort_keys=True)
+            serialized = json.dumps(ctx.to_payload_dict(), **json_dumps_additional_kwargs())
 
             # dispatch the next event to aws kinesis/dynamodb
             sent = self._send_next_event_for_dispatch(
@@ -570,13 +595,11 @@ class Context(dict):
 
         :param obj: a dict.
         """
-        logger.exception('Error occurred during FSM.dispatch().')
-
         # fetch the original payload from the obj in-memory data. we grab the original
         # payload rather than the current context to avoid passing any vars that were
         # potentially mutated up to this point.
         payload = obj[OBJ.PAYLOAD]
-        retry_data = json.loads(payload)
+        retry_data = json.loads(payload, **json_loads_additional_kwargs())
         retry_system_context = retry_data[PAYLOAD.SYSTEM_CONTEXT]
         retry_system_context[SYSTEM_CONTEXT.RETRIES] += 1
 
@@ -614,6 +637,8 @@ class Context(dict):
             self._dispatch(event, obj)
 
         except Exception:
+            logger.exception('Error occurred during FSM.dispatch().')
+
             # not-normal, un-happy path
             self._retry(obj)
 
@@ -677,14 +702,23 @@ class Context(dict):
         try:
             # attempt to acquire the lease and execute the state transition
             fence_token = acquire_lease(self.correlation_id, self.steps, self.retries,
-                                        primary=self.lease_primary)
+                                        primary=self.lease_primary, timeout=self.lease_timeout)
 
             # 0 indicates system error, False indicates lease acquisition failure
-            if fence_token == 0:
+            #
+            # >>> 0 == False
+            # True
+            # >>> 0 is 0
+            # True
+            # >>> 0 is 0L
+            # False
+            # >>>
+            #
+            if not isinstance(fence_token, bool) and fence_token == 0:
                 self._queue_error(ERRORS.CACHE, 'System error acquiring primary=%s lease.' % self.lease_primary)
                 self.lease_primary = not self.lease_primary
                 fence_token = acquire_lease(self.correlation_id, self.steps, self.retries,
-                                            primary=self.lease_primary)
+                                            primary=self.lease_primary, timeout=self.lease_timeout)
 
             if not fence_token:
                 # could not get the lease. something is going wrong
@@ -746,7 +780,7 @@ class Context(dict):
                 # understand fence tokens.
 
                 # make the fence token available
-                if isinstance(fence_token, (int, long)):
+                if isinstance(fence_token, int):
                     obj[OBJ.FENCE_TOKEN] = fence_token
 
                 self._dispatch_and_retry(event, obj)

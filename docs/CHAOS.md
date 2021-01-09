@@ -1,5 +1,5 @@
 <!--
-Copyright 2016-2017 Workiva Inc.
+Copyright 2016-2020 Workiva Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,19 +28,21 @@ will fail.
 
 For example
 
-    PRIMARY_STREAM_SOURCE = 'arn:aws:kinesis:eu-west-1:999999999999:stream/aws-lambda-fsm'
-    PRIMARY_CACHE_SOURCE = 'arn:aws:dynamodb:eu-west-1:999999999999:table/aws-lambda-fsm.cache'
+```python
+PRIMARY_STREAM_SOURCE = 'arn:aws:kinesis:eu-west-1:999999999999:stream/aws-lambda-fsm'
+PRIMARY_CACHE_SOURCE = 'arn:aws:dynamodb:eu-west-1:999999999999:table/aws-lambda-fsm.cache'
 
-    from botocore.exceptions import ClientError
-    
-    AWS_CHAOS = {
-        PRIMARY_STREAM_SOURCE': {
-            ClientError({'Error': {'Code': 404, 'Message': 'AWS Chaos'}}, 'service'): 0.1,
-        },
-        PRIMARY_CACHE_SOURCE: {
-            ClientError({'Error': {'Code': 404, 'Message': 'AWS Chaos'}}, 'service'): 0.1,
-        }
+from botocore.exceptions import ClientError
+
+AWS_CHAOS = {
+    PRIMARY_STREAM_SOURCE': {
+        ClientError({'Error': {'Code': 404, 'Message': 'AWS Chaos'}}, 'service'): 0.1,
+    },
+    PRIMARY_CACHE_SOURCE: {
+        ClientError({'Error': {'Code': 404, 'Message': 'AWS Chaos'}}, 'service'): 0.1,
     }
+}
+```
     
 This works locally and when deployed to AWS.
 

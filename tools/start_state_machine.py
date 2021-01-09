@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,14 +37,12 @@ from aws_lambda_fsm.constants import STATE
 from aws_lambda_fsm.constants import SYSTEM_CONTEXT
 from aws_lambda_fsm.constants import AWS_KINESIS
 from aws_lambda_fsm.constants import AWS
+from aws_lambda_fsm.serialization import json_loads_additional_kwargs
 
 import settings
 
 # setup the command line args
 parser = argparse.ArgumentParser(description='Starts a state machine.')
-parser.add_argument('--kinesis_stream_arn', default='PRIMARY_STREAM_SOURCE')
-parser.add_argument('--dynamodb_table_arn', default='PRIMARY_STREAM_SOURCE')
-parser.add_argument('--sns_topic_arn', default='PRIMARY_STREAM_SOURCE')
 parser.add_argument('--machine_name')
 parser.add_argument('--checkpoint_shard_id')
 parser.add_argument('--checkpoint_sequence_number')
@@ -68,7 +66,7 @@ validate_config()
 
 if args.num_machines > 1:
     # start things off
-    context = json.loads(args.initial_context or "{}")
+    context = json.loads(args.initial_context or "{}", **json_loads_additional_kwargs())
     current_state = current_event = STATE.PSEUDO_INIT
     start_state_machines(args.machine_name,
                          [context] * args.num_machines,
@@ -104,7 +102,7 @@ if args.checkpoint_shard_id and args.checkpoint_sequence_number:
         Limit=1
     )
     if records:
-        context = json.loads(records[AWS_KINESIS.Records][0][AWS_KINESIS.DATA])
+        context = json.loads(records[AWS_KINESIS.Records][0][AWS_KINESIS.DATA], **json_loads_additional_kwargs())
         current_state = context.get(SYSTEM_CONTEXT.CURRENT_STATE)
         current_event = context.get(SYSTEM_CONTEXT.CURRENT_EVENT)
     else:
@@ -112,7 +110,7 @@ if args.checkpoint_shard_id and args.checkpoint_sequence_number:
 
 # no checkpoint specified, so start with an empty context
 else:
-    context = json.loads(args.initial_context or "{}")
+    context = json.loads(args.initial_context or "{}", **json_loads_additional_kwargs())
     current_state = current_event = STATE.PSEUDO_INIT
 
 # start things off

@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -43,3 +43,95 @@ machines:
 
   - name: end
     final: true
+
+- name: looper-local
+
+  states:
+
+    - name: start
+      initial: true
+      do_action: tests.integration.actions.IncrementCounter
+      transitions:
+        - target: start
+          event: ok
+          local: true
+        - target: end
+          event: done
+          local: true
+
+    - name: end
+      final: true
+
+
+- name: looper-mixed
+
+  states:
+
+    - name: start
+      initial: true
+      do_action: tests.integration.actions.IncrementCounter
+      transitions:
+        - target: start
+          event: ok
+          local: true
+        - target: reset
+          event: done
+
+    - name: reset
+      do_action: tests.integration.actions.ResetCounter
+      transitions:
+        - target: loop
+          event: done
+
+    - name: loop
+      do_action: tests.integration.actions.IncrementCounter
+      transitions:
+        - target: loop
+          event: ok
+          local: true
+        - target: end
+          event: done
+
+    - name: end
+      final: true
+
+
+- name: serialization
+
+  states:
+
+    - name: start
+      initial: true
+      do_action: tests.integration.actions.SerializationProblem
+      transitions:
+        - target: middle
+          event: ok
+
+    - name: middle
+      do_action: tests.integration.actions.ReturnOK
+      transitions:
+        - target: end
+          event: ok
+
+    - name: end
+      final: true
+
+- name: longpause
+
+  states:
+
+    - name: start
+      initial: true
+      do_action: tests.integration.actions.LongPause
+      transitions:
+        - target: middle
+          event: ok
+
+    - name: middle
+      do_action: tests.integration.actions.ReturnOK
+      transitions:
+        - target: end
+          event: ok
+
+    - name: end
+      final: true

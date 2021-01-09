@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ import unittest
 import copy
 import json
 
+
 # library imports
 import mock
 from botocore.exceptions import ClientError
@@ -26,11 +27,12 @@ from aws_lambda_fsm.action import Action
 from aws_lambda_fsm.fsm import FSM
 from aws_lambda_fsm import config
 from aws_lambda_fsm.fsm import Context
+from aws_lambda_fsm.fsm import json_dumps_additional_kwargs
 
 
 class TestAction(Action):
     def execute(self, context, obj):
-        return 'ok'
+        return 'c'
 
 
 class ErrorAction(Action):
@@ -181,6 +183,7 @@ class TestDispatchAndRetry(TestFsmBase):
                 "current_state": "s",
                 "current_event": "e",
                 "correlation_id": "b",
+                "additional_delay_seconds": 0,
                 "steps": 999,
                 "retries": 0,
                 "metrics": "m",
@@ -201,10 +204,11 @@ class TestDispatchAndRetry(TestFsmBase):
         instance._dispatch_and_retry(
             'pseudo_init',
             {
-                'payload': json.dumps(payload),
+                'payload': json.dumps(payload, **json_dumps_additional_kwargs()),
                 'source': 'dynamodb_retry'
             }
         )
+        self.assertEqual(instance.retries, 0)
         return instance
 
     @mock.patch('aws_lambda_fsm.fsm.get_message_dispatched')
@@ -270,7 +274,8 @@ class TestDispatchAndRetry(TestFsmBase):
         instance = self._dispatch(mock_send_next_event_for_dispatch)
         mock_send_next_event_for_dispatch.assert_called_with(
             instance,
-            '{"system_context": {"correlation_id": "b", "current_event": "ok", "current_state": '
+            '{"system_context": {"additional_delay_seconds": 0, '
+            '"correlation_id": "b", "current_event": "c", "current_state": '
             '"a", "machine_name": "foo", "max_retries": 5, "metrics": "m", "retries": 0, "steps": 1000, "stream": '
             '"s", "table": "t", "topic": "z"}, "user_context": {}, "version": "0.1"}',
             'b',
@@ -309,7 +314,8 @@ class TestDispatchAndRetry(TestFsmBase):
         instance = self._dispatch(mock_send_next_event_for_dispatch)
         mock_send_next_event_for_dispatch.assert_called_with(
             instance,
-            '{"system_context": {"correlation_id": "b", "current_event": "ok", "current_state": '
+            '{"system_context": {"additional_delay_seconds": 0, '
+            '"correlation_id": "b", "current_event": "c", "current_state": '
             '"a", "machine_name": "foo", "max_retries": 5, "metrics": "m", "retries": 0, "steps": 1000, "stream": "s", '
             '"table": "t", "topic": "z"}, "user_context": {}, "version": "0.1"}',
             'b',
@@ -357,7 +363,8 @@ class TestDispatchAndRetry(TestFsmBase):
         instance = self._dispatch(mock_send_next_event_for_dispatch)
         mock_send_next_event_for_dispatch.assert_called_with(
             instance,
-            '{"system_context": {"correlation_id": "b", "current_event": "ok", "current_state": '
+            '{"system_context": {"additional_delay_seconds": 0, '
+            '"correlation_id": "b", "current_event": "c", "current_state": '
             '"a", "machine_name": "foo", "max_retries": 5, "metrics": "m", "retries": 0, "steps": 1000, "stream": '
             '"s", "table": "t", "topic": "z"}, "user_context": {}, "version": "0.1"}',
             'b',
@@ -368,7 +375,8 @@ class TestDispatchAndRetry(TestFsmBase):
         mock_start_retries.assert_called_with(
             instance,
             2.0,
-            '{"system_context": {"correlation_id": "b", "current_event": "e", "current_state": '
+            '{"system_context": {"additional_delay_seconds": 0, '
+            '"correlation_id": "b", "current_event": "e", "current_state": '
             '"s", "machine_name": "foo", "metrics": "m", "retries": 1, "steps": 999, "stream": '
             '"s", "table": "t", "topic": "z"}, "user_context": {}, "version": "0.1"}',
             primary=True,
@@ -403,7 +411,8 @@ class TestDispatchAndRetry(TestFsmBase):
         )
         mock_send_next_event_for_dispatch.assert_called_with(
             instance,
-            '{"system_context": {"correlation_id": "b", "current_event": "ok", "current_state": '
+            '{"system_context": {"additional_delay_seconds": 0, '
+            '"correlation_id": "b", "current_event": "c", "current_state": '
             '"a", "machine_name": "foo", "max_retries": 5, "metrics": "m", "retries": 0, "steps": 1000, "stream": '
             '"s", "table": "t", "topic": "z"}, "user_context": {}, "version": "0.1"}',
             'b',
@@ -450,7 +459,8 @@ class TestDispatchAndRetry(TestFsmBase):
         )
         mock_send_next_event_for_dispatch.assert_called_with(
             instance,
-            '{"system_context": {"correlation_id": "b", "current_event": "ok", "current_state": '
+            '{"system_context": {"additional_delay_seconds": 0, '
+            '"correlation_id": "b", "current_event": "c", "current_state": '
             '"a", "machine_name": "foo", "max_retries": 5, "metrics": "m", "retries": 0, "steps": 1000, "stream": '
             '"s", "table": "t", "topic": "z"}, "user_context": {}, "version": "0.1"}',
             'b',
@@ -496,7 +506,8 @@ class TestDispatchExclusiveLock(TestFsmBase):
             'bobloblaw',
             0,
             0,
-            primary=True
+            primary=True,
+            timeout=300
         )
         mock_release_lease.assert_called_with(
             'bobloblaw',
@@ -531,7 +542,49 @@ class TestDispatchExclusiveLock(TestFsmBase):
             'bobloblaw',
             0,
             0,
-            primary=False
+            primary=True,
+            timeout=300
+        )
+        mock_release_lease.assert_called_with(
+            'bobloblaw',
+            0,
+            0,
+            False,
+            primary=True
+        )
+        self.assertEqual(
+            [
+                mock.call('cache', 'Could not acquire lease. Retrying.'),
+                mock.call('cache', 'Could not release lease.')
+            ],
+            mock_queue_error.mock_calls
+        )
+        mock_retry.assert_called_with(
+            {'foo': 'bar'}
+        )
+
+    @mock.patch('aws_lambda_fsm.fsm.uuid')
+    @mock.patch('aws_lambda_fsm.fsm.acquire_lease')
+    @mock.patch('aws_lambda_fsm.fsm.release_lease')
+    @mock.patch('aws_lambda_fsm.fsm.Context._queue_error')
+    @mock.patch('aws_lambda_fsm.fsm.Context._retry')
+    def test_lease_0(self,
+                     mock_retry,
+                     mock_queue_error,
+                     mock_release_lease,
+                     mock_acquire_lease,
+                     mock_uuid):
+        mock_uuid.uuid4.return_value.hex = 'bobloblaw'
+        mock_acquire_lease.return_value = 0
+        mock_release_lease.return_value = 0
+        instance = Context('name')
+        instance.dispatch('event', {'foo': 'bar'})
+        mock_acquire_lease.assert_called_with(
+            'bobloblaw',
+            0,
+            0,
+            primary=False,
+            timeout=300
         )
         mock_release_lease.assert_called_with(
             'bobloblaw',
@@ -551,6 +604,28 @@ class TestDispatchExclusiveLock(TestFsmBase):
         mock_retry.assert_called_with(
             {'foo': 'bar'}
         )
+
+    @mock.patch('aws_lambda_fsm.fsm.uuid')
+    @mock.patch('aws_lambda_fsm.fsm.acquire_lease')
+    @mock.patch('aws_lambda_fsm.fsm.release_lease')
+    @mock.patch('aws_lambda_fsm.fsm.Context._queue_error')
+    @mock.patch('aws_lambda_fsm.fsm.Context._retry')
+    def test_lease_fence_token_int(self,
+                                   mock_retry,
+                                   mock_queue_error,
+                                   mock_release_lease,
+                                   mock_acquire_lease,
+                                   mock_uuid):
+        mock_uuid.uuid4.return_value.hex = 'bobloblaw'
+        # equivalent to long in Python 2
+        mock_acquire_lease.return_value = int(500)
+        mock_release_lease.return_value = False
+        instance = Context('name')
+        obj = {'foo': 'bar'}
+        instance.dispatch('event', obj)
+        self.assertTrue('fence_token' in obj,
+                        "Fence token should be set on the object if it's a numeric type.")
+        self.assertEqual(obj['fence_token'], int(500))
 
 
 class TestContextPrimarySecondary(TestFsmBase):
@@ -714,8 +789,9 @@ class TestRetry(TestFsmBase):
         )
         instance._dispatch_and_retry(
             'pseudo_init',
-            {'payload': json.dumps(payload), 'source': 'dynamodb_retry'}
+            {'payload': json.dumps(payload, **json_dumps_additional_kwargs()), 'source': 'dynamodb_retry'}
         )
+        self.assertEqual(instance.retries, retries)
         return instance
 
     @mock.patch('aws_lambda_fsm.fsm.Context._queue_error')
@@ -839,3 +915,35 @@ class TestProperties(TestFsmBase):
         fsm = FSM(config_dict=self.CONFIG_DICT)
         instance = fsm.create_FSM_instance('foo', initial_system_context={'correlation_id': 'barfoo'})
         self.assertEqual('barfoo', instance.correlation_id)
+
+    def test_additional_delay_seconds_defaults_to_0(self):
+        config._config = {'some/fsm.yaml': {'machines': []}}
+        fsm = FSM(config_dict=self.CONFIG_DICT)
+        instance = fsm.create_FSM_instance('foo', initial_system_context={})
+        self.assertEqual(0, instance.additional_delay_seconds)
+
+    def test_additional_delay_seconds(self):
+        config._config = {'some/fsm.yaml': {'machines': []}}
+        fsm = FSM(config_dict=self.CONFIG_DICT)
+        instance = fsm.create_FSM_instance('foo', initial_system_context={'additional_delay_seconds': 999})
+        self.assertEqual(999, instance.additional_delay_seconds)
+
+    def test_lookup_property_uses_context(self):
+        config._config = {'some/fsm.yaml': {'machines': []}}
+        fsm = FSM(config_dict=self.CONFIG_DICT)
+        instance = fsm.create_FSM_instance('foo', initial_system_context={"key": "context"})
+        self.assertEqual("context", instance._lookup_property("key", "setting", "default"))
+
+    @mock.patch('aws_lambda_fsm.fsm.settings')
+    def test_lookup_property_uses_settings(self, mock_settings):
+        mock_settings.setting = "foobar"
+        config._config = {'some/fsm.yaml': {'machines': []}}
+        fsm = FSM(config_dict=self.CONFIG_DICT)
+        instance = fsm.create_FSM_instance('foo', initial_system_context={})
+        self.assertEqual("foobar", instance._lookup_property("key", "setting", "default"))
+
+    def test_lookup_property_uses_constant(self):
+        config._config = {'some/fsm.yaml': {'machines': []}}
+        fsm = FSM(config_dict=self.CONFIG_DICT)
+        instance = fsm.create_FSM_instance('foo', initial_system_context={})
+        self.assertEqual("default", instance._lookup_property("key", "setting", "default"))

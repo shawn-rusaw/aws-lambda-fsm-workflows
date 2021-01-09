@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,14 +14,19 @@
 
 # system imports
 import mock
+import threading
+import time
 
 # library imports
 
 # application imports
 from aws_lambda_fsm.fsm import FSM
 from aws_lambda_fsm.config import get_current_configuration
+from aws_lambda_fsm.constants import AWS as AWS_CONSTANTS
 from tests.integration.utils import AWSStub
 from tests.integration.utils import BaseFunctionalTest
+from .actions import get_counter
+from .actions import set_counter
 
 AWS = AWSStub()
 
@@ -199,7 +204,10 @@ class Test(BaseFunctionalTest):
     ################################################################################
 
     def test_looper(self, *args):
+        set_counter(0)
+        self.assertEqual(0, get_counter())
         self._execute(AWS, "looper", {"loops": 3})
+        self.assertEqual(3, get_counter())
 
         # check messages
         expected = [
@@ -383,3 +391,231 @@ class Test(BaseFunctionalTest):
             ]
         ]
         self.assertEqual(expected, AWS.errors.trace(raw=True))
+
+    ################################################################################
+    # START: machine_name="looper-local"
+    ################################################################################
+
+    def test_looper_local(self, *args):
+        set_counter(0)
+        self.assertEqual(0, get_counter())
+
+        AWS.add_callback('send_next_event_for_dispatch', mock.Mock(side_effect=([None] + [Exception()] * 100)))
+        self._execute(AWS, "looper-local", {"loops": 3})
+        self.assertEqual(3, get_counter())
+
+        # check messages
+        expected = [
+            (0, ('pseudo_init', 'pseudo_init', 0, 0), (None,)),
+        ]
+        self.assertEqual(expected, AWS.all_sources.trace(('counter',)))
+
+        # check cache
+        expected = {
+            'correlation_id-0': True
+        }
+        self.assertEqual(expected, AWS.primary_cache)
+        self.assertEqual(expected, AWS.secondary_cache)
+        expected = {
+            'correlation_id-0': True,
+            'lease-correlation_id-0': True
+        }
+        self.assertEqual(expected, AWS.all_caches)
+
+        # check errors
+        expected = []
+        self.assertEqual(expected, AWS.errors.trace(raw=True))
+
+    def test_looper_local_with_failure(self, *args):
+        set_counter(0)
+        self.assertEqual(0, get_counter())
+
+        AWS.add_callback('send_next_event_for_dispatch', mock.Mock(side_effect=([None] + [Exception()] * 100)))
+        self._execute(AWS, "looper-local", {"loops": 3, 'fail_at': [(i, 0) for i in range(100)]})
+        self.assertEqual(3, get_counter())
+
+        # check messages
+        expected = [
+            (0, ('pseudo_init', 'pseudo_init', 0, 0), (None,)),
+            (1, ('pseudo_init', 'pseudo_init', 0, 1), (None,))  # retry
+        ]
+        self.assertEqual(expected, AWS.all_sources.trace(('counter',)))
+
+        # check cache
+        expected = {
+            'correlation_id-0': True
+        }
+        self.assertEqual(expected, AWS.primary_cache)
+        self.assertEqual(expected, AWS.secondary_cache)
+        expected = {
+            'correlation_id-0': True,
+            'lease-correlation_id-0': True
+        }
+        self.assertEqual(expected, AWS.all_caches)
+
+        # check errors
+        expected = [
+            [
+                {'retry': 1},
+                {'current_state': 'pseudo_init', 'current_event': 'pseudo_init', 'machine_name': 'looper-local'}
+            ]
+        ]
+        self.assertEqual(expected, AWS.errors.trace(raw=True))
+
+    ################################################################################
+    # START: machine_name="looper-mixed"
+    ################################################################################
+
+    def test_looper_mixed(self, *args):
+        set_counter(0)
+        self.assertEqual(0, get_counter())
+        self._execute(AWS, "looper-mixed", {"loops": 3})
+        self.assertEqual(6, get_counter())
+
+        # check messages
+        expected = [
+            (0, ('pseudo_init', 'pseudo_init', 0, 0), (None,)),
+            (1, ('start', 'done', 1, 0), (3,)),
+            (2, ('reset', 'done', 2, 0), (None,)),
+            (3, ('loop', 'done', 3, 0), (3,))
+        ]
+        self.assertEqual(expected, AWS.all_sources.trace(('counter',)))
+
+        # check cache
+        expected = {
+            'correlation_id-0': True,
+            'correlation_id-1': True,
+            'correlation_id-2': True,
+            'correlation_id-3': True
+        }
+        self.assertEqual(expected, AWS.primary_cache)
+        self.assertEqual(expected, AWS.secondary_cache)
+        expected = {
+            'correlation_id-0': True,
+            'correlation_id-1': True,
+            'correlation_id-2': True,
+            'correlation_id-3': True,
+            'lease-correlation_id-0': True,
+            'lease-correlation_id-1': True,
+            'lease-correlation_id-2': True,
+            'lease-correlation_id-3': True
+        }
+        self.assertEqual(expected, AWS.all_caches)
+
+        # check errors
+        expected = []
+        self.assertEqual(expected, AWS.errors.trace(raw=True))
+
+    def test_looper_mixed_with_failure(self, *args):
+        set_counter(0)
+        self.assertEqual(0, get_counter())
+        self._execute(AWS, "looper-mixed", {"loops": 3, 'fail_at': [(i, 0) for i in range(100)]})
+        self.assertEqual(6, get_counter())
+
+        # check messages
+        expected = [
+            (0, ('pseudo_init', 'pseudo_init', 0, 0), (None,)),
+            (1, ('pseudo_init', 'pseudo_init', 0, 1), (None,)),  # retry
+            (2, ('start', 'done', 1, 0), (3,)),
+            (3, ('reset', 'done', 2, 0), (None,)),
+            (4, ('reset', 'done', 2, 1), (None,)),  # retry
+            (5, ('loop', 'done', 3, 0), (3,))
+        ]
+        self.assertEqual(expected, AWS.all_sources.trace(('counter',)))
+
+        # check cache
+        expected = {
+            'correlation_id-0': True,
+            'correlation_id-1': True,
+            'correlation_id-2': True,
+            'correlation_id-3': True
+        }
+        self.assertEqual(expected, AWS.primary_cache)
+        self.assertEqual(expected, AWS.secondary_cache)
+        expected = {
+            'correlation_id-0': True,
+            'correlation_id-1': True,
+            'correlation_id-2': True,
+            'correlation_id-3': True,
+            'lease-correlation_id-0': True,
+            'lease-correlation_id-1': True,
+            'lease-correlation_id-2': True,
+            'lease-correlation_id-3': True
+        }
+        self.assertEqual(expected, AWS.all_caches)
+
+        # check errors
+        expected = [
+            [
+                {'retry': 1},
+                {'current_event': 'pseudo_init', 'current_state': 'pseudo_init', 'machine_name': 'looper-mixed'}
+            ],
+            [
+                {'retry': 1},
+                {'current_event': 'done', 'current_state': 'reset', 'machine_name': 'looper-mixed'}
+            ]
+        ]
+        self.assertEqual(expected, AWS.errors.trace(raw=True))
+
+    def test_looper_mixed_uses_queue(self, *args):
+        AWS.add_callback('send_next_event_for_dispatch', mock.Mock(side_effect=Exception()))
+        self.assertRaises(Exception, self._execute, AWS, "looper-mixed", {"loops": 3})
+
+    ################################################################################
+    # START: machine_name="serialization"
+    ################################################################################
+
+    def test_serialization(self, *args):
+        self._execute(AWS, "serialization", {})
+
+        # check messages
+        expected = [
+            (0, ('pseudo_init', 'pseudo_init', 0, 0), (None,)),
+            (1, ('start', 'ok', 1, 0), ('<not_serializable>',)),
+            (2, ('middle', 'ok', 2, 0), ('<not_serializable>',))
+        ]
+        self.assertEqual(expected, AWS.all_sources.trace(uvars={"error"}))
+
+    ################################################################################
+    # START: machine_name="longpause"
+    ################################################################################
+
+    def test_two_at_same_time(self, *args):
+        thread1 = TestThread(self, "longpause", {'key': 'val1'})
+        thread2 = TestThread(self, "longpause", {'key': 'val2'})
+        thread1.start()
+        time.sleep(2)
+        thread2.start()
+        thread1.join()
+        thread2.join()
+        expected = [
+            (0, ('pseudo_init', 'pseudo_init', 0, 0), ('val1',)),
+            (1, ('pseudo_init', 'pseudo_init', 0, 0), ('val2',)),  # both start
+            (2, ('pseudo_init', 'pseudo_init', 0, 1), ('val2',)),  # second unable to acquire lease
+            (3, ('start', 'ok', 1, 0), ('val1',)),
+            (4, ('middle', 'ok', 2, 0), ('val1',)),  # first finished
+            (5, ('start', 'ok', 1, 0), ('val2',))  # second gets lease, but that has already run
+        ]
+        self.assertEqual(expected, AWS.all_sources.trace(uvars={"key"}))
+
+
+class TestThread(threading.Thread):
+
+    def __init__(self, test, name, context):
+        threading.Thread.__init__(self)
+        self.test = test
+        self.name = name
+        self.context = context
+
+    def run(self):
+        self.test._execute(AWS, self.name, self.context)
+
+
+class TestSqs(Test):
+
+    MESSAGE_TYPE = AWS_CONSTANTS.SQS
+
+
+class TestSns(Test):
+
+    MESSAGE_TYPE = AWS_CONSTANTS.SNS

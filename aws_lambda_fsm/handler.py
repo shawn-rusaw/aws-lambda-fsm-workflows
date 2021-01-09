@@ -1,4 +1,4 @@
-# Copyright 2016-2017 Workiva Inc.
+# Copyright 2016-2020 Workiva Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ import base64
 import json
 import logging
 import time
+from collections import Counter
 
 # application imports
 from aws_lambda_fsm.fsm import Context
@@ -33,6 +34,9 @@ from aws_lambda_fsm.constants import AWS
 from aws_lambda_fsm.constants import STREAM_DATA
 from aws_lambda_fsm.constants import AWS_DYNAMODB
 from aws_lambda_fsm.config import get_settings
+from aws_lambda_fsm.serialization import json_dumps_additional_kwargs
+from aws_lambda_fsm.serialization import json_loads_additional_kwargs
+
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -48,11 +52,11 @@ def _process_payload(payload_str, obj):
     :param payload_str: a json string like '{"serialized": "data"}'
     :param obj: a dict to pass to fsm Context.dispatch(...)
     """
-    payload = json.loads(payload_str)
+    payload = json.loads(payload_str, **json_loads_additional_kwargs())
     obj[OBJ.PAYLOAD] = payload_str
     fsm = Context.from_payload_dict(payload)
-    logger.info('system_context=%s', fsm.system_context())
-    logger.info('user_context.keys()=%s', fsm.user_context().keys())
+    logger.debug('system_context=%s', fsm.system_context())
+    logger.debug('user_context.keys()=%s', fsm.user_context().keys())
     current_event = fsm.system_context().get(SYSTEM_CONTEXT.CURRENT_EVENT, STATE.PSEUDO_INIT)
     fsm.dispatch(current_event, obj)
 
@@ -67,11 +71,11 @@ def _process_payload_step(payload_str, obj):
     :param payload_str: a json string like '{"serialized": "data"}'
     :param obj: a dict to pass to fsm Context.dispatch(...)
     """
-    payload = json.loads(payload_str)
+    payload = json.loads(payload_str, **json_loads_additional_kwargs())
     obj[OBJ.PAYLOAD] = payload_str
     fsm = Context.from_payload_dict(payload)
-    logger.info('system_context=%s', fsm.system_context())
-    logger.info('user_context.keys()=%s', fsm.user_context().keys())
+    logger.debug('system_context=%s', fsm.system_context())
+    logger.debug('user_context.keys()=%s', fsm.user_context().keys())
     current_event = fsm.system_context().get(SYSTEM_CONTEXT.CURRENT_EVENT, STATE.PSEUDO_INIT)
 
     # all retries etc. are handled by AWS Step Function infrastructure
@@ -85,113 +89,136 @@ def _process_payload_step(payload_str, obj):
         return data
 
 
-def lambda_api_handler(lambda_event):
+def lambda_api_handler(lambda_event, lambda_context):
     """
     AWS Lambda handler for executing state machines.
 
     :param lambda_event: a dict event from AWS Lambda
+    :param lambda_context: a dict context from AWS Lambda
     """
     try:
-        obj = {OBJ.SOURCE: AWS.GATEWAY}
-        payload = json.dumps(lambda_event)  # API Gateway just passes straight though
+        obj = {OBJ.SOURCE: AWS.GATEWAY, OBJ.LAMBDA_CONTEXT: lambda_context}
+        payload = json.dumps(lambda_event, **json_dumps_additional_kwargs())  # API Gateway just passes straight though
         _process_payload(payload, obj)
 
     # in batch mode, we don't want a single error to cause the the entire batch
     # to retry. for that reason, we have opted to gobble all the errors here
     # and handle retries withing the fsm dispatch code.
     except Exception:
+        lambda_event = AWS_LAMBDA.REDACTED
         logger.exception('Critical error handling lambda: %s', lambda_event)
 
 
-def lambda_step_handler(lambda_event):
+def lambda_step_handler(lambda_event, lambda_context):
     """
     AWS Lambda handler for executing state machines.
 
     :param lambda_event: a dict event from AWS Lambda
+    :param lambda_context: a dict context from AWS Lambda
     :return: a dict event to pass along to AWS Step Functions orchestration
     """
-    obj = {OBJ.SOURCE: AWS.STEP_FUNCTION}
-    payload = json.dumps(lambda_event)  # Step Function just passes straight though
+    obj = {OBJ.SOURCE: AWS.STEP_FUNCTION, OBJ.LAMBDA_CONTEXT: lambda_context}
+    payload = json.dumps(lambda_event, **json_dumps_additional_kwargs())  # Step Function just passes straight though
     return _process_payload_step(payload, obj)
 
 
-def lambda_kinesis_handler(lambda_event):
+def lambda_sqs_handler(record, lambda_context):
     """
     AWS Lambda handler for executing state machines.
 
-    :param lambda_event: a dict event from AWS Lambda
+    :param record: a dict event from AWS Lambda
+    :param lambda_context: a dict context from AWS Lambda
     """
-    if lambda_event[AWS_LAMBDA.Records]:
-        logger.info('Processing %d records from kinesis...', len(lambda_event[AWS_LAMBDA.Records]))
 
-    for record in lambda_event[AWS_LAMBDA.Records]:
+    try:
+        obj = {OBJ.SOURCE: AWS.SQS, OBJ.LAMBDA_RECORD: record, OBJ.LAMBDA_CONTEXT: lambda_context}
+        payload = record[AWS_LAMBDA.SQS_RECORD.BODY]
+        _process_payload(payload, obj)
 
-        try:
-            obj = {OBJ.SOURCE: AWS.KINESIS}
-            encoded = record[AWS_LAMBDA.KINESIS_RECORD.KINESIS][AWS_LAMBDA.KINESIS_RECORD.DATA]
-            payload = base64.b64decode(encoded)
-            _process_payload(payload, obj)
-
-        # in batch mode, we don't want a single error to cause the the entire batch
-        # to retry. for that reason, we have opted to gobble all the errors here
-        # and handle retries withing the fsm dispatch code.
-        except Exception:
-            logger.exception('Critical error handling record: %s', record)
+    # in batch mode, we don't want a single error to cause the the entire batch
+    # to retry. for that reason, we have opted to gobble all the errors here
+    # and handle retries withing the fsm dispatch code.
+    except Exception:
+        record[AWS_LAMBDA.SQS_RECORD.BODY] = AWS_LAMBDA.REDACTED
+        logger.exception('Critical error handling record: %s', record)
 
 
-def lambda_dynamodb_handler(lambda_event):
+def lambda_kinesis_handler(record, lambda_context):
     """
     AWS Lambda handler for executing state machines.
 
-    :param lambda_event: a dict event from AWS Lambda
+    :param record: a dict event from AWS Lambda
+    :param lambda_context: a dict context from AWS Lambda
     """
-    if lambda_event[AWS_LAMBDA.Records]:
-        logger.info('Processing %d records from dynamodb updates...', len(lambda_event[AWS_LAMBDA.Records]))
 
-    for record in lambda_event[AWS_LAMBDA.Records]:
+    try:
+        obj = {OBJ.SOURCE: AWS.KINESIS, OBJ.LAMBDA_RECORD: record, OBJ.LAMBDA_CONTEXT: lambda_context}
+        kinesis = record[AWS_LAMBDA.KINESIS_RECORD.KINESIS]
+        encoded = kinesis[AWS_LAMBDA.KINESIS_RECORD.DATA]
+        payload = base64.b64decode(encoded)
+        _process_payload(payload, obj)
 
-        try:
-            obj = {OBJ.SOURCE: AWS.DYNAMODB_STREAM}
-            dynamodb = record[AWS_LAMBDA.DYNAMODB_RECORD.DYNAMODB]
-            new_image = dynamodb[AWS_LAMBDA.DYNAMODB_RECORD.NewImage]
-            payload = new_image[STREAM_DATA.PAYLOAD][AWS_DYNAMODB.STRING]
-            _process_payload(payload, obj)
-
-        # in batch mode, we don't want a single error to cause the the entire batch
-        # to retry. for that reason, we have opted to gobble all the errors here
-        # and handle retries withing the fsm dispatch code.
-        except Exception:
-            logger.exception('Critical error handling record: %s', record)
+    # in batch mode, we don't want a single error to cause the the entire batch
+    # to retry. for that reason, we have opted to gobble all the errors here
+    # and handle retries withing the fsm dispatch code.
+    except Exception:
+        record.get(AWS_LAMBDA.KINESIS_RECORD.KINESIS, {})[AWS_LAMBDA.KINESIS_RECORD.DATA] = AWS_LAMBDA.REDACTED
+        logger.exception('Critical error handling record: %s', record)
 
 
-def lambda_sns_handler(lambda_event):
+def lambda_dynamodb_handler(record, lambda_context):
     """
     AWS Lambda handler for executing state machines.
 
-    :param lambda_event: a dict event from AWS Lambda
+    :param record: a dict event from AWS Lambda
+    :param lambda_context: a dict context from AWS Lambda
     """
-    if lambda_event[AWS_LAMBDA.Records]:
-        logger.info('Processing %d records from sns updates...', len(lambda_event[AWS_LAMBDA.Records]))
 
-    for record in lambda_event[AWS_LAMBDA.Records]:
+    try:
+        obj = {OBJ.SOURCE: AWS.DYNAMODB_STREAM, OBJ.LAMBDA_RECORD: record, OBJ.LAMBDA_CONTEXT: lambda_context}
+        dynamodb = record[AWS_LAMBDA.DYNAMODB_RECORD.DYNAMODB]
+        new_image = dynamodb[AWS_LAMBDA.DYNAMODB_RECORD.NewImage]
+        payload = new_image[STREAM_DATA.PAYLOAD][AWS_DYNAMODB.STRING]
+        _process_payload(payload, obj)
 
-        try:
-            obj = {OBJ.SOURCE: AWS.SNS}
-            sns = record[AWS_LAMBDA.SNS_RECORD.SNS]
-            message = sns[AWS_LAMBDA.SNS_RECORD.Message]
-            payload = json.loads(message)[AWS_LAMBDA.SNS_RECORD.DEFAULT]
-            _process_payload(payload, obj)
-
-        # in batch mode, we don't want a single error to cause the the entire batch
-        # to retry. for that reason, we have opted to gobble all the errors here
-        # and handle retries withing the fsm dispatch code.
-        except Exception:
-            logger.exception('Critical error handling record: %s', record)
+    # in batch mode, we don't want a single error to cause the the entire batch
+    # to retry. for that reason, we have opted to gobble all the errors here
+    # and handle retries withing the fsm dispatch code.
+    except Exception:
+        record.get(AWS_LAMBDA.DYNAMODB_RECORD.DYNAMODB, {}) \
+            .get(AWS_LAMBDA.DYNAMODB_RECORD.NewImage, {}) \
+            .get(STREAM_DATA.PAYLOAD, {})[AWS_DYNAMODB.STRING] = AWS_LAMBDA.REDACTED
+        logger.exception('Critical error handling record: %s', record)
 
 
-def lambda_timer_handler():
+def lambda_sns_handler(record, lambda_context):
+    """
+    AWS Lambda handler for executing state machines.
+
+    :param record: a dict event from AWS Lambda
+    :param lambda_context: a dict context from AWS Lambda
+    """
+
+    try:
+        obj = {OBJ.SOURCE: AWS.SNS, OBJ.LAMBDA_RECORD: record, OBJ.LAMBDA_CONTEXT: lambda_context}
+        sns = record[AWS_LAMBDA.SNS_RECORD.SNS]
+        payload = sns[AWS_LAMBDA.SNS_RECORD.Message]
+        _process_payload(payload, obj)
+
+    # in batch mode, we don't want a single error to cause the the entire batch
+    # to retry. for that reason, we have opted to gobble all the errors here
+    # and handle retries withing the fsm dispatch code.
+    except Exception:
+        record.get(AWS_LAMBDA.SNS_RECORD.SNS, {})[AWS_LAMBDA.SNS_RECORD.Message] = AWS_LAMBDA.REDACTED
+        logger.exception('Critical error handling record: %s', record)
+
+
+def lambda_timer_handler(lambda_event, lambda_context):
     """
     AWS Lambda handler that runs periodically.
+
+    :param lambda_event: a dict event from AWS Lambda
+    :param lambda_context: a dict context from AWS Lambda
     """
     try:
         # TODO: hide these details behind an interface
@@ -212,7 +239,7 @@ def lambda_timer_handler():
         entities = []
 
     if entities:
-        logger.info('Processing %d entities from dynamodb retries...', len(entities))
+        logger.debug('Processing %d entities from dynamodb retries...', len(entities))
 
     for entity in entities:
 
@@ -226,122 +253,167 @@ def lambda_timer_handler():
             logger.exception('Critical error handling entity: %s', entity)
 
 
+def _get_event_source(record):
+    return record.get(AWS_LAMBDA.EventSource, record.get(AWS_LAMBDA.EventSourceCaps))
+
+
 def lambda_handler(lambda_event, lambda_context):
     """
-    AWS Lambda handler that handles all Kinesis/DynamoDB/Timer/SNS events.
+    AWS Lambda handler that handles all Kinesis/DynamoDB/Timer/SNS/SQS events.
     """
 
+    # https://docs.aws.amazon.com/lambda/latest/dg/eventsources.html#eventsources-scheduled-event
+    #
     # {
-    #   "account": "123456789012",
-    #   "region": "us-east-1",
-    #   "detail": {},
-    #   "detail-type": "Scheduled Event",
-    #   "source": "aws.events",
-    #   "time": "1970-01-01T00:00:00Z",
-    #   "id": "cdc73f9d-aea9-11e3-9d5a-835b769c0d9c",
-    #   "resources": [
-    #     "arn:aws:events:us-east-1:123456789012:rule/my-schedule"
-    #   ]
+    #     "account": "123456789012",
+    #     "region": "us-east-1",
+    #     "detail": {},
+    #     "detail-type": "Scheduled Event",
+    #     "source": "aws.events",
+    #     "time": "1970-01-01T00:00:00Z",
+    #     "id": "cdc73f9d-aea9-11e3-9d5a-835b769c0d9c",
+    #     "resources": [
+    #         "arn:aws:events:us-east-1:123456789012:rule/my-schedule"
+    #     ]
     # }
-    if 'source' in lambda_event and lambda_event['source'] == 'aws.events':
-        lambda_timer_handler()
+    if lambda_event.get(AWS_LAMBDA.Source) == AWS_LAMBDA.SOURCE.EVENTS:
+        lambda_timer_handler(lambda_event, lambda_context)
 
-    # {
-    #   "Records": [
-    #     {
-    #       "eventID": "shardId-000000000000:49545115243490985018280067714973144582180062593244200961",
-    #       "eventVersion": "1.0",
-    #       "kinesis": {
-    #         "partitionKey": "partitionKey-3",
-    #         "data": "SGVsbG8sIHRoaXMgaXMgYSB0ZXN0IDEyMy4=",
-    #         "kinesisSchemaVersion": "1.0",
-    #         "sequenceNumber": "49545115243490985018280067714973144582180062593244200961"
-    #       },
-    #       "invokeIdentityArn": "arn:aws:iam::EXAMPLE",
-    #       "eventName": "aws:kinesis:record",
-    #       "eventSourceARN": "arn:aws:kinesis:EXAMPLE",
-    #       "eventSource": "aws:kinesis",
-    #       "awsRegion": "us-east-1"
-    #     }
-    #   ]
-    # }
-    elif 'Records' in lambda_event and lambda_event['Records'] and 'kinesis' in lambda_event['Records'][0]:
-        lambda_kinesis_handler(lambda_event)
+    elif AWS_LAMBDA.Records in lambda_event:
 
-    # {
-    #   "Records": [
-    #     {
-    #       "eventID": "1",
-    #       "eventVersion": "1.0",
-    #       "dynamodb": {
-    #         "Keys": {
-    #           "Id": {
-    #             "N": "101"
-    #           }
-    #         },
-    #         "NewImage": {
-    #           "Message": {
-    #             "S": "New item!"
-    #           },
-    #           "Id": {
-    #             "N": "101"
-    #           }
-    #         },
-    #         "StreamViewType": "NEW_AND_OLD_IMAGES",
-    #         "SequenceNumber": "111",
-    #         "SizeBytes": 26
-    #       },
-    #       "awsRegion": "us-west-2",
-    #       "eventName": "INSERT",
-    #       "eventSourceARN": "arn:aws:dynamodb:us-west-2:account-id:table/Example/stream/2015-06-27T00:48:05.899",
-    #       "eventSource": "aws:dynamodb"
-    #     }
-    #   ]
-    # }
-    elif 'Records' in lambda_event and lambda_event['Records'] and 'dynamodb' in lambda_event['Records'][0]:
-        lambda_dynamodb_handler(lambda_event)
+        records = lambda_event.get(AWS_LAMBDA.Records, [])
 
-    # {
-    #   "Records": [
-    #     {
-    #       "EventVersion": "1.0",
-    #       "EventSubscriptionArn": "arn:aws:sns:EXAMPLE",
-    #       "EventSource": "aws:sns",
-    #       "Sns": {
-    #         "SignatureVersion": "1",
-    #         "Timestamp": "1970-01-01T00:00:00.000Z",
-    #         "Signature": "EXAMPLE",
-    #         "SigningCertUrl": "EXAMPLE",
-    #         "MessageId": "95df01b4-ee98-5cb9-9903-4c221d41eb5e",
-    #         "Message": u'{"default": "Hello from SNS!"}',
-    #         "MessageAttributes": {
-    #           "Test": {
-    #             "Type": "String",
-    #             "Value": "TestString"
-    #           },
-    #           "TestBinary": {
-    #             "Type": "Binary",
-    #             "Value": "TestBinary"
-    #           }
-    #         },
-    #         "Type": "Notification",
-    #         "UnsubscribeUrl": "EXAMPLE",
-    #         "TopicArn": "arn:aws:sns:EXAMPLE",
-    #         "Subject": "TestInvoke"
-    #       }
-    #     }
-    #   ]
-    # }
-    elif 'Records' in lambda_event and lambda_event['Records'] and 'Sns' in lambda_event['Records'][0]:
-        lambda_sns_handler(lambda_event)
+        logger.debug('Processing %s records...', Counter(_get_event_source(record) for record in records))
+
+        for record in records:
+
+            # https://docs.aws.amazon.com/lambda/latest/dg/eventsources.html#eventsources-kinesis-streams
+            #
+            # {
+            #     "Records": [
+            #         {
+            #             "eventID": "shardId-000000000000:49545115243490985018280067714973144582180062593244200961",
+            #             "eventVersion": "1.0",
+            #             "kinesis": {
+            #                 "partitionKey": "partitionKey-3",
+            #                 "data": "SGVsbG8sIHRoaXMgaXMgYSB0ZXN0IDEyMy4=",
+            #                 "kinesisSchemaVersion": "1.0",
+            #                 "sequenceNumber": "49545115243490985018280067714973144582180062593244200961"
+            #             },
+            #             "invokeIdentityArn": identityarn,
+            #             "eventName": "aws:kinesis:record",
+            #             "eventSourceARN": eventsourcearn,
+            #             "eventSource": "aws:kinesis",
+            #             "awsRegion": "us-east-1"
+            #         }, ...
+            #     ]
+            # }
+            if record.get(AWS_LAMBDA.EventSource) == AWS_LAMBDA.EVENT_SOURCE.KINESIS:
+                lambda_kinesis_handler(record, lambda_context)
+
+            # https://docs.aws.amazon.com/lambda/latest/dg/eventsources.html#eventsources-ddb-update
+            #
+            # {
+            #     "Records": [
+            #         {
+            #             "eventID": "1",
+            #             "eventVersion": "1.0",
+            #             "dynamodb": {
+            #                 "Keys": {
+            #                     "Id": {
+            #                         "N": "101"
+            #                     }
+            #                 },
+            #                 "NewImage": {
+            #                     "Message": {
+            #                         "S": "New item!"
+            #                     },
+            #                     "Id": {
+            #                         "N": "101"
+            #                     }
+            #                 },
+            #                 "StreamViewType": "NEW_AND_OLD_IMAGES",
+            #                 "SequenceNumber": "111",
+            #                 "SizeBytes": 26
+            #             },
+            #             "awsRegion": "us-west-2",
+            #             "eventName": "INSERT",
+            #             "eventSourceARN": eventsourcearn,
+            #             "eventSource": "aws:dynamodb"
+            #         }, ...
+            #     ]
+            # }
+            elif record.get(AWS_LAMBDA.EventSource) == AWS_LAMBDA.EVENT_SOURCE.DYNAMODB:
+                lambda_dynamodb_handler(record, lambda_context)
+
+            # https://docs.aws.amazon.com/lambda/latest/dg/eventsources.html#eventsources-sns
+            #
+            # {
+            #     "Records": [
+            #         {
+            #             "EventVersion": "1.0",
+            #             "EventSubscriptionArn": eventsubscriptionarn,
+            #             "EventSource": "aws:sns",
+            #             "Sns": {
+            #                 "SignatureVersion": "1",
+            #                 "Timestamp": "1970-01-01T00:00:00.000Z",
+            #                 "Signature": "EXAMPLE",
+            #                 "SigningCertUrl": "EXAMPLE",
+            #                 "MessageId": "95df01b4-ee98-5cb9-9903-4c221d41eb5e",
+            #                 "Message": "Hello from SNS!",
+            #                 "MessageAttributes": {
+            #                     "Test": {
+            #                         "Type": "String",
+            #                         "Value": "TestString"
+            #                     },
+            #                     "TestBinary": {
+            #                         "Type": "Binary",
+            #                         "Value": "TestBinary"
+            #                     }
+            #                 },
+            #                 "Type": "Notification",
+            #                 "UnsubscribeUrl": "EXAMPLE",
+            #                 "TopicArn": topicarn,
+            #                 "Subject": "TestInvoke"
+            #             }
+            #         }, ...
+            #     ]
+            # }
+            elif record.get(AWS_LAMBDA.EventSource) == AWS_LAMBDA.EVENT_SOURCE.SNS:
+                lambda_sns_handler(record, lambda_context)
+
+            # https://docs.aws.amazon.com/lambda/latest/dg/eventsources.html#eventsources-sqs
+            #
+            # {
+            #     "Records": [
+            #         {
+            #             "messageId": "c80e8021-a70a-42c7-a470-796e1186f753",
+            #             "receiptHandle": "AQEBJQ+/u6NsnT5t8Q/VbVxgVP...GwvTQ==",
+            #             "body": "{\"foo\":\"bar\"}",
+            #             "attributes": {
+            #                 "ApproximateReceiveCount": "3",
+            #                 "SentTimestamp": "1529104986221",
+            #                 "SenderId": "594035263019",
+            #                 "ApproximateFirstReceiveTimestamp": "1529104986230"
+            #             },
+            #             "messageAttributes": {},
+            #             "md5OfBody": "9bb58f26192e4ba00f01e2e7b136bbd8",
+            #             "eventSource": "aws:sqs",
+            #             "eventSourceARN": "arn:aws:sqs:us-west-2:594035263019:NOTFIFOQUEUE",
+            #             "awsRegion": "us-west-2"
+            #         }, ...
+            #     ]
+            # }
+            elif record.get(AWS_LAMBDA.EventSource) == AWS_LAMBDA.EVENT_SOURCE.SQS:
+                lambda_sqs_handler(record, lambda_context)
 
     # TODO: see if there is some other way to distinguish step function calls from api gateway calls
     #       injecting a parameter is not ideal
 
     # Step Functions
     elif lambda_event.get(AWS.STEP_FUNCTION):
-        return lambda_step_handler(lambda_event)
+        return lambda_step_handler(lambda_event, lambda_context)
 
     # API Gateway
     else:
-        lambda_api_handler(lambda_event)
+        lambda_api_handler(lambda_event, lambda_context)
